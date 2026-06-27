@@ -13,7 +13,7 @@ final class DemoControlServiceTests: XCTestCase {
         XCTAssertEqual(response.activePlanningArtifactID, "issue-2")
         XCTAssertEqual(response.attachedSessions.count, 0)
         XCTAssertFalse(response.structuredActionAvailability.guardedStop.isAvailable)
-        XCTAssertEqual(response.fileReview.status, "placeholder")
+        XCTAssertEqual(response.fileReview.status, .unavailable)
         XCTAssertEqual(response.auditTimeline.summary, "Audit Timeline")
         XCTAssertEqual(response.auditTimeline.entries.count, 0)
     }

@@ -90,10 +90,9 @@ public struct GitWorktreeBaselineCapturer: WorktreeBaselineCapturing {
         do {
             let branch = try gitText(arguments: ["-C", repositoryURL.path, "rev-parse", "--abbrev-ref", "HEAD"])
             let head = try? gitText(arguments: ["-C", repositoryURL.path, "rev-parse", "HEAD"])
-            let status = try gitText(arguments: ["-C", repositoryURL.path, "status", "--porcelain"])
-            let changedFileCount = status
-                .split(separator: "\n", omittingEmptySubsequences: true)
-                .count
+            let status = try gitTextPreservingWhitespace(arguments: ["-C", repositoryURL.path, "status", "--porcelain"])
+            let changedFiles = parsePorcelainStatus(status)
+            let changedFileCount = changedFiles.count
             let shortHead = head.map { String($0.prefix(12)) } ?? "unknown HEAD"
             let isDirty = changedFileCount > 0
             let summary = isDirty
@@ -106,6 +105,7 @@ public struct GitWorktreeBaselineCapturer: WorktreeBaselineCapturing {
                 headSHA: head,
                 isDirty: isDirty,
                 changedFileCount: changedFileCount,
+                changedFiles: changedFiles,
                 summary: summary,
                 capturedAt: now()
             )
@@ -119,8 +119,38 @@ public struct GitWorktreeBaselineCapturer: WorktreeBaselineCapturing {
     }
 
     private func gitText(arguments: [String]) throws -> String {
+        try gitTextPreservingWhitespace(arguments: arguments).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func gitTextPreservingWhitespace(arguments: [String]) throws -> String {
         let result = try executor.run(executable: "git", arguments: arguments)
-        return String(decoding: result.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(decoding: result.stdout, as: UTF8.self)
+    }
+
+    private func parsePorcelainStatus(_ rawStatus: String) -> [WorktreeBaselineFileChange] {
+        rawStatus
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .compactMap { line in
+                let rawLine = String(line)
+                guard rawLine.count >= 4 else {
+                    return nil
+                }
+
+                let status = String(rawLine.prefix(2))
+                let pathText = String(rawLine.dropFirst(3))
+                if let range = pathText.range(of: " -> ") {
+                    return WorktreeBaselineFileChange(
+                        path: String(pathText[range.upperBound...]),
+                        previousPath: String(pathText[..<range.lowerBound]),
+                        status: status.trimmingCharacters(in: .whitespaces)
+                    )
+                }
+
+                return WorktreeBaselineFileChange(
+                    path: pathText,
+                    status: status.trimmingCharacters(in: .whitespaces)
+                )
+            }
     }
 }
 

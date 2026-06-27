@@ -7,7 +7,7 @@ public struct PlanningCenteredState: Equatable, Sendable {
     public var attachedSession: AttachedSessionSummary?
     public var pendingApprovalRequest: ApprovalRequestSummary?
     public var structuredActions: [StructuredActionSummary]
-    public var fileReview: PlaceholderSummary
+    public var fileReview: FileReviewSummary
     public var auditTimeline: AuditTimelineSummary
 
     public init(
@@ -16,7 +16,7 @@ public struct PlanningCenteredState: Equatable, Sendable {
         attachedSession: AttachedSessionSummary?,
         pendingApprovalRequest: ApprovalRequestSummary? = nil,
         structuredActions: [StructuredActionSummary],
-        fileReview: PlaceholderSummary,
+        fileReview: FileReviewSummary,
         auditTimeline: AuditTimelineSummary
     ) {
         self.configuredRepositoryPath = configuredRepositoryPath
@@ -121,6 +121,77 @@ public struct PlaceholderSummary: Equatable, Sendable {
     }
 }
 
+public struct FileReviewSummary: Equatable, Sendable {
+    public var title: String
+    public var detail: String
+    public var changedFileCount: Int
+    public var preExistingChangeCount: Int
+    public var agentSessionChangeCount: Int
+    public var files: [FileReviewFileSummary]
+
+    public init(
+        title: String,
+        detail: String,
+        changedFileCount: Int,
+        preExistingChangeCount: Int,
+        agentSessionChangeCount: Int,
+        files: [FileReviewFileSummary]
+    ) {
+        self.title = title
+        self.detail = detail
+        self.changedFileCount = changedFileCount
+        self.preExistingChangeCount = preExistingChangeCount
+        self.agentSessionChangeCount = agentSessionChangeCount
+        self.files = files
+    }
+}
+
+public struct FileReviewFileSummary: Equatable, Identifiable, Sendable {
+    public var id: String
+    public var path: String
+    public var previousPath: String?
+    public var ownershipTitle: String
+    public var changeKindTitle: String
+    public var changeSize: String
+    public var summary: String
+    public var riskSignals: [String]
+    public var selectedHunks: [FileReviewHunkSummary]
+
+    public init(
+        id: String,
+        path: String,
+        previousPath: String?,
+        ownershipTitle: String,
+        changeKindTitle: String,
+        changeSize: String,
+        summary: String,
+        riskSignals: [String],
+        selectedHunks: [FileReviewHunkSummary]
+    ) {
+        self.id = id
+        self.path = path
+        self.previousPath = previousPath
+        self.ownershipTitle = ownershipTitle
+        self.changeKindTitle = changeKindTitle
+        self.changeSize = changeSize
+        self.summary = summary
+        self.riskSignals = riskSignals
+        self.selectedHunks = selectedHunks
+    }
+}
+
+public struct FileReviewHunkSummary: Equatable, Identifiable, Sendable {
+    public var id: String
+    public var header: String
+    public var lines: [String]
+
+    public init(id: String, header: String, lines: [String]) {
+        self.id = id
+        self.header = header
+        self.lines = lines
+    }
+}
+
 public struct AuditTimelineSummary: Equatable, Sendable {
     public var title: String
     public var entries: [AuditTimelineItemSummary]
@@ -167,10 +238,7 @@ public struct PlanningStateMapper: PlanningStateMapping {
             attachedSession: attachedSession,
             pendingApprovalRequest: response.pendingApprovalRequest.map(approvalRequestSummary),
             structuredActions: actionSummaries(response.structuredActionAvailability),
-            fileReview: PlaceholderSummary(
-                title: "File Review",
-                detail: "\(response.fileReview.summary) Changed files: \(response.fileReview.changedFileCount)."
-            ),
+            fileReview: fileReviewSummary(response.fileReview),
             auditTimeline: AuditTimelineSummary(
                 title: response.auditTimeline.summary,
                 entries: response.auditTimeline.entries.map {
@@ -244,10 +312,71 @@ public struct PlanningStateMapper: PlanningStateMapping {
             requestedAt: request.requestedAt
         )
     }
+
+    private func fileReviewSummary(_ fileReview: FileReviewState) -> FileReviewSummary {
+        FileReviewSummary(
+            title: "File Review",
+            detail: "\(fileReview.summary) Changed files: \(fileReview.changedFileCount).",
+            changedFileCount: fileReview.changedFileCount,
+            preExistingChangeCount: fileReview.preExistingChangeCount,
+            agentSessionChangeCount: fileReview.agentSessionChangeCount,
+            files: fileReview.files.map(fileReviewFileSummary)
+        )
+    }
+
+    private func fileReviewFileSummary(_ file: FileReviewFile) -> FileReviewFileSummary {
+        FileReviewFileSummary(
+            id: file.id,
+            path: file.path,
+            previousPath: file.previousPath,
+            ownershipTitle: file.ownership.displayTitle,
+            changeKindTitle: file.changeKind.displayTitle,
+            changeSize: "+\(file.additions) / -\(file.deletions)",
+            summary: file.summary,
+            riskSignals: file.riskSignals,
+            selectedHunks: file.selectedHunks.map {
+                FileReviewHunkSummary(id: $0.id, header: $0.header, lines: $0.lines)
+            }
+        )
+    }
 }
 
 public enum PlanningStateMapperError: Error, Equatable {
     case missingActivePlanningArtifact
+}
+
+private extension FileReviewFile.Ownership {
+    var displayTitle: String {
+        switch self {
+        case .preExistingDirtyWorktree:
+            return "Pre-existing"
+        case .agentSession:
+            return "Agent Session"
+        }
+    }
+}
+
+private extension FileReviewFile.ChangeKind {
+    var displayTitle: String {
+        switch self {
+        case .added:
+            return "Added"
+        case .modified:
+            return "Modified"
+        case .deleted:
+            return "Deleted"
+        case .renamed:
+            return "Renamed"
+        case .untracked:
+            return "Untracked"
+        case .copied:
+            return "Copied"
+        case .typeChanged:
+            return "Type Changed"
+        case .unknown:
+            return "Changed"
+        }
+    }
 }
 
 private extension AgentSession.State {

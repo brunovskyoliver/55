@@ -47,6 +47,7 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
         tmuxLauncher: any TmuxLaunching = TmuxClaudeLauncher(),
         inputSender: any WrappedSessionInputSending = TmuxWrappedSessionInputSender(),
         approvalDecisionSender: any ApprovalDecisionSending = TmuxApprovalDecisionSender(),
+        fileReviewBuilder: any FileReviewBuilding = GitFileReviewBuilder(),
         sessionStore: any SessionEventStoring = SQLiteSessionStore(
             databaseURL: FileManager.default.temporaryDirectory
                 .appending(path: "AgentSessionControl-\(UUID().uuidString).sqlite")
@@ -65,7 +66,8 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
         self.now = now
         self.state = LockedDemoControlServiceState(
             configuredRepositoryURL: configuredRepositoryURL,
-            sessionStore: sessionStore
+            sessionStore: sessionStore,
+            fileReviewBuilder: fileReviewBuilder
         )
     }
 
@@ -381,8 +383,8 @@ public extension DemoControlService {
             draftComment: StructuredActionState(isAvailable: false, reason: "Draft Comments arrive in a later slice"),
             guardedStop: StructuredActionState(isAvailable: false, reason: "No Agent Session")
         ),
-        fileReview: FileReviewPlaceholder(
-            status: "placeholder",
+        fileReview: FileReviewState(
+            status: .unavailable,
             summary: "File Review will compare the session changes to the Worktree Baseline in a later slice.",
             changedFileCount: 0
         ),
@@ -398,15 +400,21 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
     private let configuredRepositoryURL: URL
     private let configuredRepository: ConfiguredRepository
     private let sessionStore: any SessionEventStoring
+    private let fileReviewBuilder: any FileReviewBuilding
     private var activeAttachment: PlanningArtifact?
     private var activeSession: AttachedSession?
     private var pendingInput: PendingInputState = .unavailable
     private var pendingApprovalRequest: ApprovalRequestState?
     private var decidedApprovalRequestIDs: Set<String> = []
 
-    init(configuredRepositoryURL: URL, sessionStore: any SessionEventStoring) {
+    init(
+        configuredRepositoryURL: URL,
+        sessionStore: any SessionEventStoring,
+        fileReviewBuilder: any FileReviewBuilding
+    ) {
         self.configuredRepositoryURL = configuredRepositoryURL
         self.sessionStore = sessionStore
+        self.fileReviewBuilder = fileReviewBuilder
         self.configuredRepository = ConfiguredRepository(
             id: "configured-repository",
             path: configuredRepositoryURL.path
@@ -730,11 +738,9 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
                     reason: hasActiveSession ? "Wrapped Session is active" : "No Agent Session"
                 )
             ),
-            fileReview: FileReviewPlaceholder(
-                status: "placeholder",
-                summary: activeSession?.session.worktreeBaseline?.summary
-                    ?? "File Review is unavailable until a Wrapped Session starts.",
-                changedFileCount: 0
+            fileReview: fileReviewBuilder.buildFileReview(
+                repositoryURL: configuredRepositoryURL,
+                activeSession: activeSession
             ),
             auditTimeline: AuditTimelinePlaceholder(
                 summary: "Audit Timeline",

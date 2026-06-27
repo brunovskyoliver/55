@@ -38,6 +38,13 @@ final class WrappedSessionLaunchTests: XCTestCase {
 
         XCTAssertTrue(baseline.isDirty)
         XCTAssertEqual(baseline.changedFileCount, 2)
+        XCTAssertEqual(
+            baseline.changedFiles,
+            [
+                WorktreeBaselineFileChange(path: "Sources/App.swift", status: "M"),
+                WorktreeBaselineFileChange(path: "Tests/NewTests.swift", status: "??")
+            ]
+        )
         XCTAssertEqual(baseline.summary, "Dirty worktree: 2 changed files on feature/session at 1234567890ab.")
     }
 
@@ -67,6 +74,7 @@ final class WrappedSessionLaunchTests: XCTestCase {
             configuredRepositoryURL: URL(fileURLWithPath: "/repo"),
             baselineCapturer: FakeBaselineCapturer(baseline: .clean, events: RecordedLaunchEvents()),
             tmuxLauncher: FakeTmuxLauncher(),
+            fileReviewBuilder: BaselineEchoFileReviewBuilder(),
             sessionIDGenerator: { "session-2" }
         )
 
@@ -180,6 +188,7 @@ private func launchableService(
         configuredRepositoryURL: URL(fileURLWithPath: "/repo"),
         baselineCapturer: FakeBaselineCapturer(baseline: baseline, events: events),
         tmuxLauncher: tmuxLauncher,
+        fileReviewBuilder: BaselineEchoFileReviewBuilder(),
         sessionStore: sessionStore,
         sessionIDGenerator: { "session-5" }
     )
@@ -261,6 +270,26 @@ private final class FakeTmuxLauncher: TmuxLaunching, @unchecked Sendable {
                 attachCommand: "tmux attach-session -t agent-\(planningArtifact.id)"
             )
         }
+    }
+}
+
+private struct BaselineEchoFileReviewBuilder: FileReviewBuilding {
+    func buildFileReview(repositoryURL: URL, activeSession: AttachedSession?) -> FileReviewState {
+        guard let baseline = activeSession?.session.worktreeBaseline else {
+            return FileReviewState(
+                status: .unavailable,
+                summary: "File Review is unavailable until a Wrapped Session starts.",
+                changedFileCount: 0
+            )
+        }
+
+        return FileReviewState(
+            status: baseline.changedFileCount == 0 ? .noChanges : .changesAvailable,
+            summary: baseline.summary,
+            changedFileCount: baseline.changedFileCount,
+            preExistingChangeCount: baseline.changedFileCount,
+            agentSessionChangeCount: 0
+        )
     }
 }
 

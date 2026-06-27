@@ -22,6 +22,8 @@ final class PlanningStateMapperTests: XCTestCase {
         let guardedStop = try XCTUnwrap(state.structuredActions.first { $0.id == "guarded-stop" })
         XCTAssertFalse(guardedStop.isAvailable)
         XCTAssertEqual(guardedStop.reason, "No Agent Session")
+        XCTAssertNil(state.structuredActions.first { $0.id == "commit" })
+        XCTAssertNil(state.structuredActions.first { $0.id == "push" })
     }
 
     func testLoaderFetchesAndMapsForegroundState() async throws {
@@ -215,6 +217,67 @@ final class PlanningStateMapperTests: XCTestCase {
         XCTAssertTrue(approve.requiresConfirmation)
         XCTAssertTrue(deny.isAvailable)
         XCTAssertTrue(deny.requiresConfirmation)
+    }
+
+    func testMapperCarriesFileReviewFiles() throws {
+        let response = ControlForegroundResponse(
+            planningArtifacts: [
+                PlanningArtifact(
+                    id: "issue-9",
+                    kind: .issue,
+                    number: 9,
+                    title: "Build File Review",
+                    url: URL(string: "https://github.com/brunovskyoliver/55/issues/9")!,
+                    state: "open"
+                )
+            ],
+            activePlanningArtifactID: "issue-9",
+            attachedSessions: [],
+            structuredActionAvailability: StructuredActionAvailability(
+                reply: StructuredActionState(isAvailable: false, reason: "No Pending Input"),
+                approve: StructuredActionState(isAvailable: false, reason: "No approval request"),
+                deny: StructuredActionState(isAvailable: false, reason: "No approval request"),
+                draftComment: StructuredActionState(isAvailable: false, reason: "No draft"),
+                guardedStop: StructuredActionState(isAvailable: false, reason: "No session")
+            ),
+            fileReview: FileReviewState(
+                status: .changesAvailable,
+                summary: "1 changed file: 0 pre-existing, 1 Agent Session.",
+                changedFileCount: 1,
+                preExistingChangeCount: 0,
+                agentSessionChangeCount: 1,
+                files: [
+                    FileReviewFile(
+                        path: "Sources/App.swift",
+                        ownership: .agentSession,
+                        changeKind: .modified,
+                        additions: 4,
+                        deletions: 1,
+                        summary: "Modified, +4/-1.",
+                        riskSignals: ["Large change"],
+                        selectedHunks: [
+                            FileReviewHunk(
+                                id: "Sources/App.swift:0",
+                                header: "@@ -1 +1 @@",
+                                lines: ["-old", "+new"]
+                            )
+                        ]
+                    )
+                ]
+            ),
+            auditTimeline: AuditTimelinePlaceholder(summary: "Audit Timeline", entries: [])
+        )
+
+        let state = try PlanningStateMapper().map(response)
+        let file = try XCTUnwrap(state.fileReview.files.first)
+
+        XCTAssertEqual(state.fileReview.changedFileCount, 1)
+        XCTAssertEqual(state.fileReview.agentSessionChangeCount, 1)
+        XCTAssertEqual(file.ownershipTitle, "Agent Session")
+        XCTAssertEqual(file.changeKindTitle, "Modified")
+        XCTAssertEqual(file.changeSize, "+4 / -1")
+        XCTAssertEqual(file.riskSignals, ["Large change"])
+        XCTAssertEqual(file.selectedHunks.first?.header, "@@ -1 +1 @@")
     }
 
     func testMapperRejectsMissingActivePlanningArtifact() {

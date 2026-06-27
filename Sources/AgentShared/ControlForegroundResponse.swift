@@ -8,7 +8,7 @@ public struct ControlForegroundResponse: Codable, Equatable, Sendable {
     public var pendingInput: PendingInputState
     public var pendingApprovalRequest: ApprovalRequestState?
     public var structuredActionAvailability: StructuredActionAvailability
-    public var fileReview: FileReviewPlaceholder
+    public var fileReview: FileReviewState
     public var auditTimeline: AuditTimelinePlaceholder
 
     public init(
@@ -19,7 +19,7 @@ public struct ControlForegroundResponse: Codable, Equatable, Sendable {
         pendingInput: PendingInputState = .unavailable,
         pendingApprovalRequest: ApprovalRequestState? = nil,
         structuredActionAvailability: StructuredActionAvailability,
-        fileReview: FileReviewPlaceholder,
+        fileReview: FileReviewState,
         auditTimeline: AuditTimelinePlaceholder
     ) {
         self.configuredRepository = configuredRepository
@@ -117,6 +117,7 @@ public struct WorktreeBaselineSummary: Codable, Equatable, Sendable {
     public var headSHA: String?
     public var isDirty: Bool
     public var changedFileCount: Int
+    public var changedFiles: [WorktreeBaselineFileChange]
     public var summary: String
     public var capturedAt: Date
 
@@ -126,6 +127,7 @@ public struct WorktreeBaselineSummary: Codable, Equatable, Sendable {
         headSHA: String?,
         isDirty: Bool,
         changedFileCount: Int,
+        changedFiles: [WorktreeBaselineFileChange] = [],
         summary: String,
         capturedAt: Date
     ) {
@@ -134,8 +136,22 @@ public struct WorktreeBaselineSummary: Codable, Equatable, Sendable {
         self.headSHA = headSHA
         self.isDirty = isDirty
         self.changedFileCount = changedFileCount
+        self.changedFiles = changedFiles
         self.summary = summary
         self.capturedAt = capturedAt
+    }
+}
+
+public struct WorktreeBaselineFileChange: Codable, Equatable, Identifiable, Sendable {
+    public var id: String { previousPath.map { "\($0)->\(path)" } ?? path }
+    public var path: String
+    public var previousPath: String?
+    public var status: String
+
+    public init(path: String, previousPath: String? = nil, status: String) {
+        self.path = path
+        self.previousPath = previousPath
+        self.status = status
     }
 }
 
@@ -185,15 +201,118 @@ public struct StructuredActionState: Codable, Equatable, Sendable {
     }
 }
 
-public struct FileReviewPlaceholder: Codable, Equatable, Sendable {
-    public var status: String
+public struct FileReviewState: Codable, Equatable, Sendable {
+    public enum Status: String, Codable, Equatable, Sendable {
+        case unavailable
+        case noChanges
+        case changesAvailable
+        case failed
+    }
+
+    public var status: Status
     public var summary: String
     public var changedFileCount: Int
+    public var preExistingChangeCount: Int
+    public var agentSessionChangeCount: Int
+    public var files: [FileReviewFile]
 
-    public init(status: String, summary: String, changedFileCount: Int) {
+    public init(
+        status: Status,
+        summary: String,
+        changedFileCount: Int,
+        preExistingChangeCount: Int = 0,
+        agentSessionChangeCount: Int = 0,
+        files: [FileReviewFile] = []
+    ) {
         self.status = status
         self.summary = summary
         self.changedFileCount = changedFileCount
+        self.preExistingChangeCount = preExistingChangeCount
+        self.agentSessionChangeCount = agentSessionChangeCount
+        self.files = files
+    }
+
+    public init(
+        status: String,
+        summary: String,
+        changedFileCount: Int,
+        preExistingChangeCount: Int = 0,
+        agentSessionChangeCount: Int = 0,
+        files: [FileReviewFile] = []
+    ) {
+        self.init(
+            status: Status(rawValue: status) ?? .unavailable,
+            summary: summary,
+            changedFileCount: changedFileCount,
+            preExistingChangeCount: preExistingChangeCount,
+            agentSessionChangeCount: agentSessionChangeCount,
+            files: files
+        )
+    }
+}
+
+public typealias FileReviewPlaceholder = FileReviewState
+
+public struct FileReviewFile: Codable, Equatable, Identifiable, Sendable {
+    public enum Ownership: String, Codable, Equatable, Sendable {
+        case preExistingDirtyWorktree
+        case agentSession
+    }
+
+    public enum ChangeKind: String, Codable, Equatable, Sendable {
+        case added
+        case modified
+        case deleted
+        case renamed
+        case untracked
+        case copied
+        case typeChanged
+        case unknown
+    }
+
+    public var id: String { previousPath.map { "\($0)->\(path)" } ?? path }
+    public var path: String
+    public var previousPath: String?
+    public var ownership: Ownership
+    public var changeKind: ChangeKind
+    public var additions: Int
+    public var deletions: Int
+    public var summary: String
+    public var riskSignals: [String]
+    public var selectedHunks: [FileReviewHunk]
+
+    public init(
+        path: String,
+        previousPath: String? = nil,
+        ownership: Ownership,
+        changeKind: ChangeKind,
+        additions: Int,
+        deletions: Int,
+        summary: String,
+        riskSignals: [String] = [],
+        selectedHunks: [FileReviewHunk] = []
+    ) {
+        self.path = path
+        self.previousPath = previousPath
+        self.ownership = ownership
+        self.changeKind = changeKind
+        self.additions = additions
+        self.deletions = deletions
+        self.summary = summary
+        self.riskSignals = riskSignals
+        self.selectedHunks = selectedHunks
+    }
+}
+
+public struct FileReviewHunk: Codable, Equatable, Identifiable, Sendable {
+    public var id: String
+    public var header: String
+    public var lines: [String]
+
+    public init(id: String, header: String, lines: [String]) {
+        self.id = id
+        self.header = header
+        self.lines = lines
     }
 }
 

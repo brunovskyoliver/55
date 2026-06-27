@@ -241,7 +241,7 @@ struct PlanningCenteredView: View {
                 pendingApprovalRequest: state.pendingApprovalRequest,
                 loader: loader
             )
-            PlaceholderSection(summary: state.fileReview)
+            FileReviewSection(summary: state.fileReview)
             AuditTimelineSection(summary: state.auditTimeline)
         }
         .listStyle(.insetGrouped)
@@ -466,6 +466,74 @@ struct PlaceholderSection: View {
             Text(summary.detail)
                 .font(.callout)
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+struct FileReviewSection: View {
+    let summary: FileReviewSummary
+
+    var body: some View {
+        Section(summary.title) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(summary.detail)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Text("\(summary.preExistingChangeCount) pre-existing, \(summary.agentSessionChangeCount) Agent Session")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+
+            ForEach(summary.files) { file in
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(file.path)
+                                .font(.subheadline.monospaced())
+                            if let previousPath = file.previousPath {
+                                Text(previousPath)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                        Text(file.changeSize)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack {
+                        Text(file.ownershipTitle)
+                        Text(file.changeKindTitle)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(file.ownershipTitle == "Pre-existing" ? .orange : .blue)
+
+                    Text(file.summary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if !file.riskSignals.isEmpty {
+                        Text(file.riskSignals.joined(separator: ", "))
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+
+                    ForEach(file.selectedHunks) { hunk in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(hunk.header)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                            Text(hunk.lines.joined(separator: "\n"))
+                                .font(.caption2.monospaced())
+                                .lineLimit(8)
+                                .truncationMode(.middle)
+                        }
+                    }
+                }
+                .accessibilityElement(children: .combine)
+            }
         }
     }
 }
