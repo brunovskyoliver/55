@@ -17,6 +17,10 @@ public protocol PendingInputReplyClient: Sendable {
     func submitPendingInputReply(_ request: SubmitPendingInputReplyRequest) async throws -> SubmitPendingInputReplyResponse
 }
 
+public protocol ApprovalDecisionClient: Sendable {
+    func submitApprovalDecision(_ request: SubmitApprovalDecisionRequest) async throws -> SubmitApprovalDecisionResponse
+}
+
 public struct HTTPForegroundStateClient: ForegroundStateClient {
     private let baseURL: URL
     private let credentials: PairedControlCredentials?
@@ -136,6 +140,32 @@ extension HTTPForegroundStateClient: PendingInputReplyClient {
         }
 
         return try decoder.decode(SubmitPendingInputReplyResponse.self, from: data)
+    }
+}
+
+extension HTTPForegroundStateClient: ApprovalDecisionClient {
+    public func submitApprovalDecision(_ request: SubmitApprovalDecisionRequest) async throws -> SubmitApprovalDecisionResponse {
+        guard baseURL.scheme == "https" else {
+            throw ForegroundStateClientError.pairedTLSRequired
+        }
+
+        var urlRequest = authorizedRequest(url: baseURL.appending(path: "v1/approval-request/decision"))
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.httpBody = try encoder.encode(request)
+
+        let (data, response) = try await session.data(for: urlRequest)
+
+        if let httpResponse = response as? HTTPURLResponse,
+           !(200..<300).contains(httpResponse.statusCode) {
+            let errorResponse = try? decoder.decode(ControlAPIErrorResponse.self, from: data)
+            throw ForegroundStateClientError.requestFailed(
+                statusCode: httpResponse.statusCode,
+                message: errorResponse?.message ?? "Approval decision failed."
+            )
+        }
+
+        return try decoder.decode(SubmitApprovalDecisionResponse.self, from: data)
     }
 }
 

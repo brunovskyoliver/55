@@ -31,24 +31,29 @@ final class PlanningCenteredStore {
     var isAttaching = false
     var isStartingSession = false
     var isSubmittingReply = false
+    var isSubmittingApprovalDecision = false
     var replyText = ""
     var isConfirmingUncertainReply = false
+    var approvalDecisionToConfirm: ApprovalRequestDecision?
 
     private let loadState: @Sendable () async throws -> PlanningCenteredState
     private let attachPlanningArtifact: @Sendable (AttachPlanningArtifactRequest) async throws -> PlanningCenteredState
     private let startWrappedSession: @Sendable () async throws -> PlanningCenteredState
     private let submitPendingInputReply: @Sendable (SubmitPendingInputReplyRequest) async throws -> PlanningCenteredState
+    private let submitApprovalDecision: @Sendable (SubmitApprovalDecisionRequest) async throws -> PlanningCenteredState
 
     init(
         loadState: @escaping @Sendable () async throws -> PlanningCenteredState,
         attachPlanningArtifact: @escaping @Sendable (AttachPlanningArtifactRequest) async throws -> PlanningCenteredState,
         startWrappedSession: @escaping @Sendable () async throws -> PlanningCenteredState,
-        submitPendingInputReply: @escaping @Sendable (SubmitPendingInputReplyRequest) async throws -> PlanningCenteredState
+        submitPendingInputReply: @escaping @Sendable (SubmitPendingInputReplyRequest) async throws -> PlanningCenteredState,
+        submitApprovalDecision: @escaping @Sendable (SubmitApprovalDecisionRequest) async throws -> PlanningCenteredState
     ) {
         self.loadState = loadState
         self.attachPlanningArtifact = attachPlanningArtifact
         self.startWrappedSession = startWrappedSession
         self.submitPendingInputReply = submitPendingInputReply
+        self.submitApprovalDecision = submitApprovalDecision
     }
 
     func foregroundSync() async {
@@ -125,6 +130,28 @@ final class PlanningCenteredStore {
             errorText = "Pending Input reply failed: \(error)"
         }
     }
+
+    func decideApproval(_ decision: ApprovalRequestDecision, requestID: String) async {
+        isSubmittingApprovalDecision = true
+        defer { isSubmittingApprovalDecision = false }
+
+        do {
+            state = try await submitApprovalDecision(
+                SubmitApprovalDecisionRequest(requestID: requestID, decision: decision)
+            )
+            approvalDecisionToConfirm = nil
+            errorText = nil
+        } catch let error as ForegroundStateClientError {
+            switch error {
+            case .requestFailed(_, let message):
+                errorText = message
+            default:
+                errorText = "Approval decision failed: \(error)"
+            }
+        } catch {
+            errorText = "Approval decision failed: \(error)"
+        }
+    }
 }
 
 extension PlanningCenteredStore {
@@ -146,6 +173,11 @@ extension PlanningCenteredStore {
         let baseURL = URL(string: "https://127.0.0.1:5577")!
         let client = HTTPForegroundStateClient(baseURL: baseURL)
         let response = try await client.submitPendingInputReply(request)
+        return try PlanningStateMapper().map(response.foregroundState)
+    } submitApprovalDecision: { request in
+        let baseURL = URL(string: "https://127.0.0.1:5577")!
+        let client = HTTPForegroundStateClient(baseURL: baseURL)
+        let response = try await client.submitApprovalDecision(request)
         return try PlanningStateMapper().map(response.foregroundState)
     }
 }
@@ -204,7 +236,11 @@ struct PlanningCenteredView: View {
 
             AgentSessionSection(session: state.attachedSession, loader: loader)
 
-            StructuredActionsSection(actions: state.structuredActions, loader: loader)
+            StructuredActionsSection(
+                actions: state.structuredActions,
+                pendingApprovalRequest: state.pendingApprovalRequest,
+                loader: loader
+            )
             PlaceholderSection(summary: state.fileReview)
             AuditTimelineSection(summary: state.auditTimeline)
         }
@@ -309,10 +345,52 @@ struct AgentSessionSection: View {
 
 struct StructuredActionsSection: View {
     let actions: [StructuredActionSummary]
+    let pendingApprovalRequest: ApprovalRequestSummary?
     @Bindable var loader: PlanningCenteredStore
 
     var body: some View {
         Section("Structured Actions") {
+            if let pendingApprovalRequest {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(pendingApprovalRequest.title)
+                        .font(.body)
+                    Text(pendingApprovalRequest.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Button {
+                            loader.approvalDecisionToConfirm = .approve
+                        } label: {
+                            Label("Approve", systemImage: "checkmark.circle.fill")
+                        }
+                        .disabled(loader.isSubmittingApprovalDecision)
+
+                        Button(role: .destructive) {
+                            loader.approvalDecisionToConfirm = .deny
+                        } label: {
+                            Label("Deny", systemImage: "xmark.circle.fill")
+                        }
+                        .disabled(loader.isSubmittingApprovalDecision)
+                    }
+                }
+                .confirmationDialog(
+                    "Send approval decision?",
+                    isPresented: approvalDecisionConfirmationBinding,
+                    titleVisibility: .visible
+                ) {
+                    if let decision = loader.approvalDecisionToConfirm {
+                        Button(decision == .approve ? "Approve" : "Deny", role: decision == .deny ? .destructive : nil) {
+                            Task {
+                                await loader.decideApproval(decision, requestID: pendingApprovalRequest.id)
+                            }
+                        }
+                    }
+                    Button("Cancel", role: .cancel) {
+                        loader.approvalDecisionToConfirm = nil
+                    }
+                }
+            }
+
             ForEach(actions) { action in
                 if action.id == "reply", action.isAvailable {
                     VStack(alignment: .leading, spacing: 8) {
@@ -345,7 +423,7 @@ struct StructuredActionsSection: View {
                             Button("Cancel", role: .cancel) {}
                         }
                     }
-                } else {
+                } else if pendingApprovalRequest == nil || (action.id != "approve" && action.id != "deny") {
                     HStack {
                         actionHeader(action)
                         Spacer()
@@ -355,6 +433,16 @@ struct StructuredActionsSection: View {
                     }
                     .accessibilityElement(children: .combine)
                 }
+            }
+        }
+    }
+
+    private var approvalDecisionConfirmationBinding: Binding<Bool> {
+        Binding {
+            loader.approvalDecisionToConfirm != nil
+        } set: { isPresented in
+            if !isPresented {
+                loader.approvalDecisionToConfirm = nil
             }
         }
     }

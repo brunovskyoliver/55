@@ -5,6 +5,7 @@ public struct PlanningCenteredState: Equatable, Sendable {
     public var configuredRepositoryPath: String?
     public var activePlanningArtifact: PlanningArtifactSummary
     public var attachedSession: AttachedSessionSummary?
+    public var pendingApprovalRequest: ApprovalRequestSummary?
     public var structuredActions: [StructuredActionSummary]
     public var fileReview: PlaceholderSummary
     public var auditTimeline: AuditTimelineSummary
@@ -13,6 +14,7 @@ public struct PlanningCenteredState: Equatable, Sendable {
         configuredRepositoryPath: String? = nil,
         activePlanningArtifact: PlanningArtifactSummary,
         attachedSession: AttachedSessionSummary?,
+        pendingApprovalRequest: ApprovalRequestSummary? = nil,
         structuredActions: [StructuredActionSummary],
         fileReview: PlaceholderSummary,
         auditTimeline: AuditTimelineSummary
@@ -20,6 +22,7 @@ public struct PlanningCenteredState: Equatable, Sendable {
         self.configuredRepositoryPath = configuredRepositoryPath
         self.activePlanningArtifact = activePlanningArtifact
         self.attachedSession = attachedSession
+        self.pendingApprovalRequest = pendingApprovalRequest
         self.structuredActions = structuredActions
         self.fileReview = fileReview
         self.auditTimeline = auditTimeline
@@ -94,6 +97,20 @@ public struct StructuredActionSummary: Equatable, Identifiable, Sendable {
     }
 }
 
+public struct ApprovalRequestSummary: Equatable, Identifiable, Sendable {
+    public var id: String
+    public var title: String
+    public var detail: String
+    public var requestedAt: Date
+
+    public init(id: String, title: String, detail: String, requestedAt: Date) {
+        self.id = id
+        self.title = title
+        self.detail = detail
+        self.requestedAt = requestedAt
+    }
+}
+
 public struct PlaceholderSummary: Equatable, Sendable {
     public var title: String
     public var detail: String
@@ -148,6 +165,7 @@ public struct PlanningStateMapper: PlanningStateMapping {
             configuredRepositoryPath: response.configuredRepository?.path,
             activePlanningArtifact: artifactSummary(activeArtifact),
             attachedSession: attachedSession,
+            pendingApprovalRequest: response.pendingApprovalRequest.map(approvalRequestSummary),
             structuredActions: actionSummaries(response.structuredActionAvailability),
             fileReview: PlaceholderSummary(
                 title: "File Review",
@@ -217,6 +235,15 @@ public struct PlanningStateMapper: PlanningStateMapping {
             requiresConfirmation: state.requiresConfirmation
         )
     }
+
+    private func approvalRequestSummary(_ request: ApprovalRequestState) -> ApprovalRequestSummary {
+        ApprovalRequestSummary(
+            id: request.requestID,
+            title: request.title,
+            detail: request.detail,
+            requestedAt: request.requestedAt
+        )
+    }
 }
 
 public enum PlanningStateMapperError: Error, Equatable {
@@ -232,6 +259,8 @@ private extension AgentSession.State {
             return "Running"
         case .waitingForInput:
             return "Waiting for Input"
+        case .waitingForApproval:
+            return "Waiting for Approval"
         case .stopped:
             return "Stopped"
         }

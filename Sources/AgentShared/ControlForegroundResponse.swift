@@ -6,6 +6,7 @@ public struct ControlForegroundResponse: Codable, Equatable, Sendable {
     public var activePlanningArtifactID: PlanningArtifact.ID?
     public var attachedSessions: [AttachedSession]
     public var pendingInput: PendingInputState
+    public var pendingApprovalRequest: ApprovalRequestState?
     public var structuredActionAvailability: StructuredActionAvailability
     public var fileReview: FileReviewPlaceholder
     public var auditTimeline: AuditTimelinePlaceholder
@@ -16,6 +17,7 @@ public struct ControlForegroundResponse: Codable, Equatable, Sendable {
         activePlanningArtifactID: PlanningArtifact.ID?,
         attachedSessions: [AttachedSession],
         pendingInput: PendingInputState = .unavailable,
+        pendingApprovalRequest: ApprovalRequestState? = nil,
         structuredActionAvailability: StructuredActionAvailability,
         fileReview: FileReviewPlaceholder,
         auditTimeline: AuditTimelinePlaceholder
@@ -25,6 +27,7 @@ public struct ControlForegroundResponse: Codable, Equatable, Sendable {
         self.activePlanningArtifactID = activePlanningArtifactID
         self.attachedSessions = attachedSessions
         self.pendingInput = pendingInput
+        self.pendingApprovalRequest = pendingApprovalRequest
         self.structuredActionAvailability = structuredActionAvailability
         self.fileReview = fileReview
         self.auditTimeline = auditTimeline
@@ -69,6 +72,7 @@ public struct AgentSession: Codable, Equatable, Identifiable, Sendable {
         case idle
         case running
         case waitingForInput
+        case waitingForApproval
         case stopped
     }
 

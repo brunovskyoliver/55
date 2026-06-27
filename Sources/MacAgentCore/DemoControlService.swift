@@ -21,11 +21,20 @@ public protocol PendingInputReplySubmitting: Sendable {
     func submitPendingInputReply(_ request: SubmitPendingInputReplyRequest) throws -> SubmitPendingInputReplyResponse
 }
 
-public final class DemoControlService: ControlAPIProviding, PlanningArtifactAttaching, WrappedSessionStarting, PendingInputSignalAccepting, PendingInputReplySubmitting, @unchecked Sendable {
+public protocol ApprovalRequestSignalAccepting: Sendable {
+    func acceptApprovalRequestSignal(_ signal: ApprovalRequestSignal) throws -> ControlForegroundResponse
+}
+
+public protocol ApprovalDecisionSubmitting: Sendable {
+    func submitApprovalDecision(_ request: SubmitApprovalDecisionRequest) throws -> SubmitApprovalDecisionResponse
+}
+
+public final class DemoControlService: ControlAPIProviding, PlanningArtifactAttaching, WrappedSessionStarting, PendingInputSignalAccepting, PendingInputReplySubmitting, ApprovalRequestSignalAccepting, ApprovalDecisionSubmitting, @unchecked Sendable {
     private let resolver: any PlanningArtifactResolving
     private let baselineCapturer: any WorktreeBaselineCapturing
     private let tmuxLauncher: any TmuxLaunching
     private let inputSender: any WrappedSessionInputSending
+    private let approvalDecisionSender: any ApprovalDecisionSending
     private let sessionIDGenerator: @Sendable () -> String
     private let eventIDGenerator: @Sendable () -> String
     private let now: @Sendable () -> Date
@@ -37,6 +46,7 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
         baselineCapturer: any WorktreeBaselineCapturing = GitWorktreeBaselineCapturer(),
         tmuxLauncher: any TmuxLaunching = TmuxClaudeLauncher(),
         inputSender: any WrappedSessionInputSending = TmuxWrappedSessionInputSender(),
+        approvalDecisionSender: any ApprovalDecisionSending = TmuxApprovalDecisionSender(),
         sessionStore: any SessionEventStoring = SQLiteSessionStore(
             databaseURL: FileManager.default.temporaryDirectory
                 .appending(path: "AgentSessionControl-\(UUID().uuidString).sqlite")
@@ -49,6 +59,7 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
         self.baselineCapturer = baselineCapturer
         self.tmuxLauncher = tmuxLauncher
         self.inputSender = inputSender
+        self.approvalDecisionSender = approvalDecisionSender
         self.sessionIDGenerator = sessionIDGenerator
         self.eventIDGenerator = eventIDGenerator
         self.now = now
@@ -64,6 +75,84 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
             occurredAt: now(),
             eventID: eventIDGenerator()
         )
+    }
+
+    public func acceptApprovalRequestSignal(_ signal: ApprovalRequestSignal) throws -> ControlForegroundResponse {
+        try state.acceptApprovalRequestSignal(
+            signal,
+            occurredAt: now(),
+            eventID: eventIDGenerator()
+        )
+    }
+
+    public func submitApprovalDecision(_ request: SubmitApprovalDecisionRequest) throws -> SubmitApprovalDecisionResponse {
+        let context = try state.prepareApprovalDecision(request)
+        let attemptTitle = context.decision == .approve
+            ? "Approval request approved"
+            : "Approval request denied"
+        try state.append(
+            event(
+                planningArtifact: context.planningArtifact,
+                agentSessionID: context.activeSession.session.id,
+                eventType: .structuredActionAttempt,
+                title: attemptTitle,
+                detail: context.approvalRequest.title,
+                metadata: [
+                    "action": "approval_decision",
+                    "approvalRequestID": context.approvalRequest.requestID,
+                    "decision": context.decision.rawValue
+                ]
+            )
+        )
+
+        do {
+            try approvalDecisionSender.sendApprovalDecision(context.decision, to: context.activeSession)
+        } catch let error as ApprovalDecisionError {
+            try? state.append(
+                event(
+                    planningArtifact: context.planningArtifact,
+                    agentSessionID: context.activeSession.session.id,
+                    eventType: .structuredActionResult,
+                    title: "Approval decision failed",
+                    detail: error.userMessage,
+                    metadata: ["action": "approval_decision", "result": "failure"]
+                )
+            )
+            throw error
+        } catch {
+            let decisionError = ApprovalDecisionError.decisionSendFailed(String(describing: error))
+            try? state.append(
+                event(
+                    planningArtifact: context.planningArtifact,
+                    agentSessionID: context.activeSession.session.id,
+                    eventType: .structuredActionResult,
+                    title: "Approval decision failed",
+                    detail: decisionError.userMessage,
+                    metadata: ["action": "approval_decision", "result": "failure"]
+                )
+            )
+            throw decisionError
+        }
+
+        let foregroundState = try state.completeApprovalDecision(
+            requestID: context.approvalRequest.requestID,
+            resultEvent: event(
+                planningArtifact: context.planningArtifact,
+                agentSessionID: context.activeSession.session.id,
+                eventType: .structuredActionResult,
+                title: context.decision == .approve
+                    ? "Approval decision delivered"
+                    : "Denial decision delivered",
+                detail: "The \(context.decision.rawValue) decision was delivered to the Wrapped Session.",
+                metadata: [
+                    "action": "approval_decision",
+                    "approvalRequestID": context.approvalRequest.requestID,
+                    "decision": context.decision.rawValue,
+                    "result": "success"
+                ]
+            )
+        )
+        return SubmitApprovalDecisionResponse(foregroundState: foregroundState)
     }
 
     public func submitPendingInputReply(_ request: SubmitPendingInputReplyRequest) throws -> SubmitPendingInputReplyResponse {
@@ -312,6 +401,8 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
     private var activeAttachment: PlanningArtifact?
     private var activeSession: AttachedSession?
     private var pendingInput: PendingInputState = .unavailable
+    private var pendingApprovalRequest: ApprovalRequestState?
+    private var decidedApprovalRequestIDs: Set<String> = []
 
     init(configuredRepositoryURL: URL, sessionStore: any SessionEventStoring) {
         self.configuredRepositoryURL = configuredRepositoryURL
@@ -335,7 +426,8 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
                 for: activeAttachment,
                 configuredRepository: configuredRepository,
                 activeSession: activeSession,
-                pendingInput: pendingInput
+                pendingInput: pendingInput,
+                pendingApprovalRequest: pendingApprovalRequest
             )
         }
     }
@@ -348,7 +440,8 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
                 for: attachment,
                 configuredRepository: configuredRepository,
                 activeSession: activeSession,
-                pendingInput: pendingInput
+                pendingInput: pendingInput,
+                pendingApprovalRequest: pendingApprovalRequest
             )
         }
     }
@@ -391,6 +484,7 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
 
             activeAttachment = planningArtifact
             pendingInput = .unavailable
+            pendingApprovalRequest = nil
             let session = AgentSession(
                 id: sessionID,
                 displayName: "Claude Code Wrapped Session",
@@ -409,7 +503,8 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
                 for: planningArtifact,
                 configuredRepository: configuredRepository,
                 activeSession: attachedSession,
-                pendingInput: pendingInput
+                pendingInput: pendingInput,
+                pendingApprovalRequest: pendingApprovalRequest
             )
             return StartWrappedSessionResponse(attachedSession: attachedSession, foregroundState: foregroundState)
         }
@@ -427,9 +522,7 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
 
             let nextPendingInput = nextPendingInputState(from: signal, current: pendingInput, occurredAt: occurredAt)
             pendingInput = nextPendingInput
-            self.activeSession = activeSession.withState(
-                nextPendingInput.status == .unavailable ? .running : .waitingForInput
-            )
+            self.activeSession = activeSession.withState(sessionState(pendingInput: nextPendingInput, pendingApprovalRequest: pendingApprovalRequest))
 
             try sessionStore.append(
                 SessionEventLogEntry(
@@ -451,7 +544,55 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
                 for: activeAttachment,
                 configuredRepository: configuredRepository,
                 activeSession: self.activeSession,
-                pendingInput: pendingInput
+                pendingInput: pendingInput,
+                pendingApprovalRequest: pendingApprovalRequest
+            )
+        }
+    }
+
+    func acceptApprovalRequestSignal(
+        _ signal: ApprovalRequestSignal,
+        occurredAt: Date,
+        eventID: String
+    ) throws -> ControlForegroundResponse {
+        try lock.withLock {
+            guard let activeAttachment, let activeSession else {
+                throw ApprovalDecisionError.noActiveSession
+            }
+
+            let approvalRequest = ApprovalRequestState(
+                requestID: signal.requestID,
+                source: signal.source,
+                title: signal.title,
+                detail: signal.detail,
+                requestedAt: occurredAt
+            )
+            pendingApprovalRequest = approvalRequest
+            self.activeSession = activeSession.withState(.waitingForApproval)
+
+            try sessionStore.append(
+                SessionEventLogEntry(
+                    id: eventID,
+                    planningArtifactID: activeAttachment.id,
+                    agentSessionID: activeSession.session.id,
+                    eventType: .structuredActionAttempt,
+                    title: "Approval request detected",
+                    detail: signal.title,
+                    occurredAt: occurredAt,
+                    metadata: [
+                        "action": "approval_request",
+                        "approvalRequestID": signal.requestID,
+                        "approvalRequestSource": signal.source.rawValue
+                    ]
+                )
+            )
+
+            return try foregroundState(
+                for: activeAttachment,
+                configuredRepository: configuredRepository,
+                activeSession: self.activeSession,
+                pendingInput: pendingInput,
+                pendingApprovalRequest: pendingApprovalRequest
             )
         }
     }
@@ -484,6 +625,33 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
         }
     }
 
+    func prepareApprovalDecision(_ request: SubmitApprovalDecisionRequest) throws -> ApprovalDecisionContext {
+        try lock.withLock {
+            guard let activeAttachment, let activeSession else {
+                throw ApprovalDecisionError.noActiveSession
+            }
+
+            if decidedApprovalRequestIDs.contains(request.requestID) {
+                throw ApprovalDecisionError.duplicateDecision
+            }
+
+            guard let pendingApprovalRequest else {
+                throw ApprovalDecisionError.noPendingApprovalRequest
+            }
+
+            guard pendingApprovalRequest.requestID == request.requestID else {
+                throw ApprovalDecisionError.staleRequest
+            }
+
+            return ApprovalDecisionContext(
+                planningArtifact: activeAttachment,
+                activeSession: activeSession,
+                approvalRequest: pendingApprovalRequest,
+                decision: request.decision
+            )
+        }
+    }
+
     func completePendingInputReply(_ resultEvent: SessionEventLogEntry) throws -> ControlForegroundResponse {
         try lock.withLock {
             guard let activeAttachment, let activeSession else {
@@ -492,13 +660,37 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
 
             try sessionStore.append(resultEvent)
             pendingInput = .unavailable
-            self.activeSession = activeSession.withState(.running)
+            self.activeSession = activeSession.withState(sessionState(pendingInput: pendingInput, pendingApprovalRequest: pendingApprovalRequest))
 
             return try foregroundState(
                 for: activeAttachment,
                 configuredRepository: configuredRepository,
                 activeSession: self.activeSession,
-                pendingInput: pendingInput
+                pendingInput: pendingInput,
+                pendingApprovalRequest: pendingApprovalRequest
+            )
+        }
+    }
+
+    func completeApprovalDecision(requestID: String, resultEvent: SessionEventLogEntry) throws -> ControlForegroundResponse {
+        try lock.withLock {
+            guard let activeAttachment, let activeSession else {
+                throw ApprovalDecisionError.noActiveSession
+            }
+
+            try sessionStore.append(resultEvent)
+            decidedApprovalRequestIDs.insert(requestID)
+            if pendingApprovalRequest?.requestID == requestID {
+                pendingApprovalRequest = nil
+            }
+            self.activeSession = activeSession.withState(sessionState(pendingInput: pendingInput, pendingApprovalRequest: pendingApprovalRequest))
+
+            return try foregroundState(
+                for: activeAttachment,
+                configuredRepository: configuredRepository,
+                activeSession: self.activeSession,
+                pendingInput: pendingInput,
+                pendingApprovalRequest: pendingApprovalRequest
             )
         }
     }
@@ -507,10 +699,11 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
         for artifact: PlanningArtifact,
         configuredRepository: ConfiguredRepository,
         activeSession: AttachedSession?,
-        pendingInput: PendingInputState
+        pendingInput: PendingInputState,
+        pendingApprovalRequest: ApprovalRequestState?
     ) throws -> ControlForegroundResponse {
         let attachedSessions = activeSession.map { [$0] } ?? []
-        let sessionIsRunning = activeSession?.session.state == .running
+        let hasActiveSession = activeSession?.session.state != nil && activeSession?.session.state != .stopped
         let auditEvents = try sessionStore.query(
             SessionEventQuery(planningArtifactID: artifact.id, limit: 20)
         )
@@ -521,10 +714,11 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
             activePlanningArtifactID: artifact.id,
             attachedSessions: attachedSessions,
             pendingInput: pendingInput,
+            pendingApprovalRequest: pendingApprovalRequest,
             structuredActionAvailability: StructuredActionAvailability(
                 reply: replyActionState(for: pendingInput),
-                approve: StructuredActionState(isAvailable: false, reason: "No approval request"),
-                deny: StructuredActionState(isAvailable: false, reason: "No approval request"),
+                approve: approvalActionState(for: pendingApprovalRequest, decision: .approve),
+                deny: approvalActionState(for: pendingApprovalRequest, decision: .deny),
                 draftComment: StructuredActionState(
                     isAvailable: artifact.kind == .issue,
                     reason: artifact.kind == .issue
@@ -532,8 +726,8 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
                         : "PR review comments arrive in a later slice"
                 ),
                 guardedStop: StructuredActionState(
-                    isAvailable: sessionIsRunning,
-                    reason: sessionIsRunning ? "Wrapped Session is running" : "No Agent Session"
+                    isAvailable: hasActiveSession,
+                    reason: hasActiveSession ? "Wrapped Session is active" : "No Agent Session"
                 )
             ),
             fileReview: FileReviewPlaceholder(
@@ -554,6 +748,17 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
                 }
             )
         )
+    }
+
+    private func sessionState(
+        pendingInput: PendingInputState,
+        pendingApprovalRequest: ApprovalRequestState?
+    ) -> AgentSession.State {
+        if pendingApprovalRequest != nil {
+            return .waitingForApproval
+        }
+
+        return pendingInput.status == .unavailable ? .running : .waitingForInput
     }
 
     private func nextPendingInputState(
@@ -604,6 +809,30 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
         }
     }
 
+    private func approvalActionState(
+        for request: ApprovalRequestState?,
+        decision: ApprovalRequestDecision
+    ) -> StructuredActionState {
+        guard let request else {
+            return StructuredActionState(isAvailable: false, reason: "No approval request")
+        }
+
+        switch decision {
+        case .approve:
+            return StructuredActionState(
+                isAvailable: true,
+                reason: "Approve: \(request.title)",
+                requiresConfirmation: true
+            )
+        case .deny:
+            return StructuredActionState(
+                isAvailable: true,
+                reason: "Deny: \(request.title)",
+                requiresConfirmation: true
+            )
+        }
+    }
+
     private func lifecycleTitle(for pendingInput: PendingInputState) -> String {
         switch pendingInput.status {
         case .unavailable:
@@ -637,6 +866,13 @@ private struct PendingInputReplyContext: Sendable {
     var activeSession: AttachedSession
     var pendingInput: PendingInputState
     var reply: String
+}
+
+private struct ApprovalDecisionContext: Sendable {
+    var planningArtifact: PlanningArtifact
+    var activeSession: AttachedSession
+    var approvalRequest: ApprovalRequestState
+    var decision: ApprovalRequestDecision
 }
 
 private extension AttachedSession {

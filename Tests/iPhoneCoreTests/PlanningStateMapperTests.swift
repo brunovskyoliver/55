@@ -150,6 +150,73 @@ final class PlanningStateMapperTests: XCTestCase {
         XCTAssertTrue(reply.requiresConfirmation)
     }
 
+    func testMapperCarriesPendingApprovalRequestAndActions() throws {
+        let requestedAt = Date(timeIntervalSince1970: 50)
+        let response = ControlForegroundResponse(
+            planningArtifacts: [
+                PlanningArtifact(
+                    id: "issue-8",
+                    kind: .issue,
+                    number: 8,
+                    title: "Handle Claude Code approve and deny Structured Actions",
+                    url: URL(string: "https://github.com/brunovskyoliver/55/issues/8")!,
+                    state: "open"
+                )
+            ],
+            activePlanningArtifactID: "issue-8",
+            attachedSessions: [
+                AttachedSession(
+                    planningArtifactID: "issue-8",
+                    session: AgentSession(
+                        id: "session-8",
+                        displayName: "Claude Code Wrapped Session",
+                        state: .waitingForApproval,
+                        summary: "Waiting for approval."
+                    )
+                )
+            ],
+            pendingApprovalRequest: ApprovalRequestState(
+                requestID: "approval-1",
+                source: .claudeCodeHook,
+                title: "Allow command?",
+                detail: "Claude Code wants to run swift test.",
+                requestedAt: requestedAt
+            ),
+            structuredActionAvailability: StructuredActionAvailability(
+                reply: StructuredActionState(isAvailable: false, reason: "No Pending Input"),
+                approve: StructuredActionState(isAvailable: true, reason: "Approve: Allow command?", requiresConfirmation: true),
+                deny: StructuredActionState(isAvailable: true, reason: "Deny: Allow command?", requiresConfirmation: true),
+                draftComment: StructuredActionState(isAvailable: false, reason: "No draft"),
+                guardedStop: StructuredActionState(isAvailable: true, reason: "Wrapped Session is active")
+            ),
+            fileReview: FileReviewPlaceholder(status: "placeholder", summary: "Unavailable", changedFileCount: 0),
+            auditTimeline: AuditTimelinePlaceholder(
+                summary: "Audit Timeline",
+                entries: [
+                    AuditTimelineEntry(
+                        id: "event-approval",
+                        title: "Approval request detected",
+                        detail: "Allow command?",
+                        occurredAt: requestedAt
+                    )
+                ]
+            )
+        )
+
+        let state = try PlanningStateMapper().map(response)
+
+        XCTAssertEqual(state.attachedSession?.stateText, "Waiting for Approval")
+        XCTAssertEqual(state.pendingApprovalRequest?.id, "approval-1")
+        XCTAssertEqual(state.pendingApprovalRequest?.title, "Allow command?")
+        XCTAssertEqual(state.auditTimeline.entries.first?.title, "Approval request detected")
+        let approve = try XCTUnwrap(state.structuredActions.first { $0.id == "approve" })
+        let deny = try XCTUnwrap(state.structuredActions.first { $0.id == "deny" })
+        XCTAssertTrue(approve.isAvailable)
+        XCTAssertTrue(approve.requiresConfirmation)
+        XCTAssertTrue(deny.isAvailable)
+        XCTAssertTrue(deny.requiresConfirmation)
+    }
+
     func testMapperRejectsMissingActivePlanningArtifact() {
         let response = ControlForegroundResponse(
             planningArtifacts: [],

@@ -30,6 +30,7 @@ public struct LocalControlAPIResponder: Sendable {
     private let artifactAttacher: (any PlanningArtifactAttaching)?
     private let sessionStarter: (any WrappedSessionStarting)?
     private let pendingInputReplySubmitter: (any PendingInputReplySubmitting)?
+    private let approvalDecisionSubmitter: (any ApprovalDecisionSubmitting)?
     private let pairingService: MacPairingService?
     private let securityPolicy: ControlAPISecurityPolicy
     private let encoder: JSONEncoder
@@ -44,6 +45,7 @@ public struct LocalControlAPIResponder: Sendable {
         self.artifactAttacher = provider as? any PlanningArtifactAttaching
         self.sessionStarter = provider as? any WrappedSessionStarting
         self.pendingInputReplySubmitter = provider as? any PendingInputReplySubmitting
+        self.approvalDecisionSubmitter = provider as? any ApprovalDecisionSubmitting
         self.pairingService = pairingService
         self.securityPolicy = securityPolicy
         self.encoder = JSONEncoder()
@@ -94,6 +96,15 @@ public struct LocalControlAPIResponder: Sendable {
             return pendingInputReplyResponse(body: request.body)
         }
 
+        if request.method == "POST", request.path == LocalControlAPIServer.approvalDecisionPath {
+            let authorization = securityPolicy.authorize(request: request, channelSecurity: channelSecurity)
+            guard case .authorized = authorization else {
+                return authorizationFailureResponse(authorization)
+            }
+
+            return approvalDecisionResponse(body: request.body)
+        }
+
         if request.method == "POST", request.path == LocalControlAPIServer.pairingCompletionPath {
             let authorization = securityPolicy.authorizePairingCompletion(channelSecurity: channelSecurity)
             guard case .authorized = authorization else {
@@ -142,6 +153,41 @@ public struct LocalControlAPIResponder: Sendable {
                 statusCode: 400,
                 errorCode: "pending_input_reply_failed",
                 message: "The Pending Input reply request could not be completed."
+            )
+        }
+    }
+
+    private func approvalDecisionResponse(body: Data) -> LocalControlAPIHTTPResponse {
+        guard let approvalDecisionSubmitter else {
+            return jsonErrorResponse(
+                status: "503 Service Unavailable",
+                statusCode: 503,
+                errorCode: "approval_decision_unavailable",
+                message: "This Mac Agent cannot submit approval decisions."
+            )
+        }
+
+        do {
+            let request = try decoder.decode(SubmitApprovalDecisionRequest.self, from: body)
+            return LocalControlAPIHTTPResponse(
+                status: "200 OK",
+                statusCode: 200,
+                contentType: "application/json",
+                body: try encoder.encode(approvalDecisionSubmitter.submitApprovalDecision(request))
+            )
+        } catch let error as ApprovalDecisionError {
+            return jsonErrorResponse(
+                status: approvalDecisionFailureStatus(for: error),
+                statusCode: approvalDecisionFailureStatusCode(for: error),
+                errorCode: error.apiErrorCode,
+                message: error.userMessage
+            )
+        } catch {
+            return jsonErrorResponse(
+                status: "400 Bad Request",
+                statusCode: 400,
+                errorCode: "approval_decision_failed",
+                message: "The approval decision request could not be completed."
             )
         }
     }
@@ -399,6 +445,24 @@ public struct LocalControlAPIResponder: Sendable {
             return 502
         }
     }
+
+    private func approvalDecisionFailureStatus(for error: ApprovalDecisionError) -> String {
+        switch error {
+        case .noActiveSession, .noPendingApprovalRequest, .staleRequest, .duplicateDecision:
+            return "409 Conflict"
+        case .decisionSendFailed:
+            return "502 Bad Gateway"
+        }
+    }
+
+    private func approvalDecisionFailureStatusCode(for error: ApprovalDecisionError) -> Int {
+        switch error {
+        case .noActiveSession, .noPendingApprovalRequest, .staleRequest, .duplicateDecision:
+            return 409
+        case .decisionSendFailed:
+            return 502
+        }
+    }
 }
 
 public final class LocalControlAPIServer: @unchecked Sendable {
@@ -407,6 +471,7 @@ public final class LocalControlAPIServer: @unchecked Sendable {
     public static let planningArtifactAttachmentPath = "/v1/planning-artifact/attachment"
     public static let wrappedSessionStartPath = "/v1/agent-session/start"
     public static let pendingInputReplyPath = "/v1/pending-input/reply"
+    public static let approvalDecisionPath = "/v1/approval-request/decision"
 
     private let responder: LocalControlAPIResponder
     private let requestedPort: UInt16
