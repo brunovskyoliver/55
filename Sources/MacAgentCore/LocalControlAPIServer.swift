@@ -29,6 +29,7 @@ public struct LocalControlAPIResponder: Sendable {
     private let provider: any ControlAPIProviding
     private let artifactAttacher: (any PlanningArtifactAttaching)?
     private let sessionStarter: (any WrappedSessionStarting)?
+    private let pendingInputReplySubmitter: (any PendingInputReplySubmitting)?
     private let pairingService: MacPairingService?
     private let securityPolicy: ControlAPISecurityPolicy
     private let encoder: JSONEncoder
@@ -42,6 +43,7 @@ public struct LocalControlAPIResponder: Sendable {
         self.provider = provider
         self.artifactAttacher = provider as? any PlanningArtifactAttaching
         self.sessionStarter = provider as? any WrappedSessionStarting
+        self.pendingInputReplySubmitter = provider as? any PendingInputReplySubmitting
         self.pairingService = pairingService
         self.securityPolicy = securityPolicy
         self.encoder = JSONEncoder()
@@ -83,6 +85,15 @@ public struct LocalControlAPIResponder: Sendable {
             return wrappedSessionStartResponse(body: request.body)
         }
 
+        if request.method == "POST", request.path == LocalControlAPIServer.pendingInputReplyPath {
+            let authorization = securityPolicy.authorize(request: request, channelSecurity: channelSecurity)
+            guard case .authorized = authorization else {
+                return authorizationFailureResponse(authorization)
+            }
+
+            return pendingInputReplyResponse(body: request.body)
+        }
+
         if request.method == "POST", request.path == LocalControlAPIServer.pairingCompletionPath {
             let authorization = securityPolicy.authorizePairingCompletion(channelSecurity: channelSecurity)
             guard case .authorized = authorization else {
@@ -98,6 +109,41 @@ public struct LocalControlAPIResponder: Sendable {
             contentType: "text/plain; charset=utf-8",
             body: Data("Not Found".utf8)
         )
+    }
+
+    private func pendingInputReplyResponse(body: Data) -> LocalControlAPIHTTPResponse {
+        guard let pendingInputReplySubmitter else {
+            return jsonErrorResponse(
+                status: "503 Service Unavailable",
+                statusCode: 503,
+                errorCode: "pending_input_reply_unavailable",
+                message: "This Mac Agent cannot submit Pending Input replies."
+            )
+        }
+
+        do {
+            let request = try decoder.decode(SubmitPendingInputReplyRequest.self, from: body)
+            return LocalControlAPIHTTPResponse(
+                status: "200 OK",
+                statusCode: 200,
+                contentType: "application/json",
+                body: try encoder.encode(pendingInputReplySubmitter.submitPendingInputReply(request))
+            )
+        } catch let error as PendingInputReplyError {
+            return jsonErrorResponse(
+                status: pendingInputReplyFailureStatus(for: error),
+                statusCode: pendingInputReplyFailureStatusCode(for: error),
+                errorCode: error.apiErrorCode,
+                message: error.userMessage
+            )
+        } catch {
+            return jsonErrorResponse(
+                status: "400 Bad Request",
+                statusCode: 400,
+                errorCode: "pending_input_reply_failed",
+                message: "The Pending Input reply request could not be completed."
+            )
+        }
     }
 
     private func wrappedSessionStartResponse(body: Data) -> LocalControlAPIHTTPResponse {
@@ -331,6 +377,28 @@ public struct LocalControlAPIResponder: Sendable {
             return 502
         }
     }
+
+    private func pendingInputReplyFailureStatus(for error: PendingInputReplyError) -> String {
+        switch error {
+        case .noActiveSession, .noPendingInput:
+            return "409 Conflict"
+        case .uncertainInputRequiresConfirmation, .emptyReply:
+            return "400 Bad Request"
+        case .inputSendFailed:
+            return "502 Bad Gateway"
+        }
+    }
+
+    private func pendingInputReplyFailureStatusCode(for error: PendingInputReplyError) -> Int {
+        switch error {
+        case .noActiveSession, .noPendingInput:
+            return 409
+        case .uncertainInputRequiresConfirmation, .emptyReply:
+            return 400
+        case .inputSendFailed:
+            return 502
+        }
+    }
 }
 
 public final class LocalControlAPIServer: @unchecked Sendable {
@@ -338,6 +406,7 @@ public final class LocalControlAPIServer: @unchecked Sendable {
     public static let pairingCompletionPath = "/v1/pairings/complete"
     public static let planningArtifactAttachmentPath = "/v1/planning-artifact/attachment"
     public static let wrappedSessionStartPath = "/v1/agent-session/start"
+    public static let pendingInputReplyPath = "/v1/pending-input/reply"
 
     private let responder: LocalControlAPIResponder
     private let requestedPort: UInt16

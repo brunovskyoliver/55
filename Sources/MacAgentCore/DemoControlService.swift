@@ -13,10 +13,19 @@ public protocol WrappedSessionStarting: Sendable {
     func startWrappedSession(_ request: StartWrappedSessionRequest) throws -> StartWrappedSessionResponse
 }
 
-public final class DemoControlService: ControlAPIProviding, PlanningArtifactAttaching, WrappedSessionStarting, @unchecked Sendable {
+public protocol PendingInputSignalAccepting: Sendable {
+    func acceptPendingInputSignal(_ signal: PendingInputSignal) throws -> ControlForegroundResponse
+}
+
+public protocol PendingInputReplySubmitting: Sendable {
+    func submitPendingInputReply(_ request: SubmitPendingInputReplyRequest) throws -> SubmitPendingInputReplyResponse
+}
+
+public final class DemoControlService: ControlAPIProviding, PlanningArtifactAttaching, WrappedSessionStarting, PendingInputSignalAccepting, PendingInputReplySubmitting, @unchecked Sendable {
     private let resolver: any PlanningArtifactResolving
     private let baselineCapturer: any WorktreeBaselineCapturing
     private let tmuxLauncher: any TmuxLaunching
+    private let inputSender: any WrappedSessionInputSending
     private let sessionIDGenerator: @Sendable () -> String
     private let eventIDGenerator: @Sendable () -> String
     private let now: @Sendable () -> Date
@@ -27,6 +36,7 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
         configuredRepositoryURL: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
         baselineCapturer: any WorktreeBaselineCapturing = GitWorktreeBaselineCapturer(),
         tmuxLauncher: any TmuxLaunching = TmuxClaudeLauncher(),
+        inputSender: any WrappedSessionInputSending = TmuxWrappedSessionInputSender(),
         sessionStore: any SessionEventStoring = SQLiteSessionStore(
             databaseURL: FileManager.default.temporaryDirectory
                 .appending(path: "AgentSessionControl-\(UUID().uuidString).sqlite")
@@ -38,6 +48,7 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
         self.resolver = resolver
         self.baselineCapturer = baselineCapturer
         self.tmuxLauncher = tmuxLauncher
+        self.inputSender = inputSender
         self.sessionIDGenerator = sessionIDGenerator
         self.eventIDGenerator = eventIDGenerator
         self.now = now
@@ -45,6 +56,73 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
             configuredRepositoryURL: configuredRepositoryURL,
             sessionStore: sessionStore
         )
+    }
+
+    public func acceptPendingInputSignal(_ signal: PendingInputSignal) throws -> ControlForegroundResponse {
+        try state.acceptPendingInputSignal(
+            signal,
+            occurredAt: now(),
+            eventID: eventIDGenerator()
+        )
+    }
+
+    public func submitPendingInputReply(_ request: SubmitPendingInputReplyRequest) throws -> SubmitPendingInputReplyResponse {
+        let context = try state.preparePendingInputReply(request)
+        let attempt = event(
+            planningArtifact: context.planningArtifact,
+            agentSessionID: context.activeSession.session.id,
+            eventType: .structuredActionAttempt,
+            title: context.pendingInput.status == .uncertain
+                ? "Uncertain Pending Input reply confirmed"
+                : "Pending Input reply requested",
+            detail: "The Owner Device submitted a guarded reply.",
+            metadata: [
+                "action": "pending_input_reply",
+                "pendingInputStatus": context.pendingInput.status.rawValue
+            ]
+        )
+        try state.append(attempt)
+
+        do {
+            try inputSender.sendReply(context.reply, to: context.activeSession)
+        } catch let error as PendingInputReplyError {
+            try? state.append(
+                event(
+                    planningArtifact: context.planningArtifact,
+                    agentSessionID: context.activeSession.session.id,
+                    eventType: .structuredActionResult,
+                    title: "Pending Input reply failed",
+                    detail: error.userMessage,
+                    metadata: ["action": "pending_input_reply", "result": "failure"]
+                )
+            )
+            throw error
+        } catch {
+            let replyError = PendingInputReplyError.inputSendFailed(String(describing: error))
+            try? state.append(
+                event(
+                    planningArtifact: context.planningArtifact,
+                    agentSessionID: context.activeSession.session.id,
+                    eventType: .structuredActionResult,
+                    title: "Pending Input reply failed",
+                    detail: replyError.userMessage,
+                    metadata: ["action": "pending_input_reply", "result": "failure"]
+                )
+            )
+            throw replyError
+        }
+
+        let foregroundState = try state.completePendingInputReply(
+            event(
+                planningArtifact: context.planningArtifact,
+                agentSessionID: context.activeSession.session.id,
+                eventType: .structuredActionResult,
+                title: "Pending Input reply sent",
+                detail: "The guarded reply was delivered to the Wrapped Session.",
+                metadata: ["action": "pending_input_reply", "result": "success"]
+            )
+        )
+        return SubmitPendingInputReplyResponse(foregroundState: foregroundState)
     }
 
     public func foregroundState() throws -> ControlForegroundResponse {
@@ -233,6 +311,7 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
     private let sessionStore: any SessionEventStoring
     private var activeAttachment: PlanningArtifact?
     private var activeSession: AttachedSession?
+    private var pendingInput: PendingInputState = .unavailable
 
     init(configuredRepositoryURL: URL, sessionStore: any SessionEventStoring) {
         self.configuredRepositoryURL = configuredRepositoryURL
@@ -255,7 +334,8 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
             return try foregroundState(
                 for: activeAttachment,
                 configuredRepository: configuredRepository,
-                activeSession: activeSession
+                activeSession: activeSession,
+                pendingInput: pendingInput
             )
         }
     }
@@ -267,7 +347,8 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
             return try foregroundState(
                 for: attachment,
                 configuredRepository: configuredRepository,
-                activeSession: activeSession
+                activeSession: activeSession,
+                pendingInput: pendingInput
             )
         }
     }
@@ -309,6 +390,7 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
             }
 
             activeAttachment = planningArtifact
+            pendingInput = .unavailable
             let session = AgentSession(
                 id: sessionID,
                 displayName: "Claude Code Wrapped Session",
@@ -326,16 +408,106 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
             let foregroundState = try foregroundState(
                 for: planningArtifact,
                 configuredRepository: configuredRepository,
-                activeSession: attachedSession
+                activeSession: attachedSession,
+                pendingInput: pendingInput
             )
             return StartWrappedSessionResponse(attachedSession: attachedSession, foregroundState: foregroundState)
+        }
+    }
+
+    func acceptPendingInputSignal(
+        _ signal: PendingInputSignal,
+        occurredAt: Date,
+        eventID: String
+    ) throws -> ControlForegroundResponse {
+        try lock.withLock {
+            guard let activeAttachment, let activeSession else {
+                throw PendingInputReplyError.noActiveSession
+            }
+
+            let nextPendingInput = nextPendingInputState(from: signal, current: pendingInput, occurredAt: occurredAt)
+            pendingInput = nextPendingInput
+            self.activeSession = activeSession.withState(
+                nextPendingInput.status == .unavailable ? .running : .waitingForInput
+            )
+
+            try sessionStore.append(
+                SessionEventLogEntry(
+                    id: eventID,
+                    planningArtifactID: activeAttachment.id,
+                    agentSessionID: activeSession.session.id,
+                    eventType: .sessionLifecycle,
+                    title: lifecycleTitle(for: nextPendingInput),
+                    detail: lifecycleDetail(for: nextPendingInput),
+                    occurredAt: occurredAt,
+                    metadata: [
+                        "pendingInputStatus": nextPendingInput.status.rawValue,
+                        "pendingInputSource": nextPendingInput.source?.rawValue ?? "none"
+                    ]
+                )
+            )
+
+            return try foregroundState(
+                for: activeAttachment,
+                configuredRepository: configuredRepository,
+                activeSession: self.activeSession,
+                pendingInput: pendingInput
+            )
+        }
+    }
+
+    func preparePendingInputReply(_ request: SubmitPendingInputReplyRequest) throws -> PendingInputReplyContext {
+        try lock.withLock {
+            guard let activeAttachment, let activeSession else {
+                throw PendingInputReplyError.noActiveSession
+            }
+
+            let reply = request.reply.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !reply.isEmpty else {
+                throw PendingInputReplyError.emptyReply
+            }
+
+            guard pendingInput.status != .unavailable else {
+                throw PendingInputReplyError.noPendingInput
+            }
+
+            if pendingInput.status == .uncertain, !request.confirmUncertainInput {
+                throw PendingInputReplyError.uncertainInputRequiresConfirmation
+            }
+
+            return PendingInputReplyContext(
+                planningArtifact: activeAttachment,
+                activeSession: activeSession,
+                pendingInput: pendingInput,
+                reply: reply
+            )
+        }
+    }
+
+    func completePendingInputReply(_ resultEvent: SessionEventLogEntry) throws -> ControlForegroundResponse {
+        try lock.withLock {
+            guard let activeAttachment, let activeSession else {
+                throw PendingInputReplyError.noActiveSession
+            }
+
+            try sessionStore.append(resultEvent)
+            pendingInput = .unavailable
+            self.activeSession = activeSession.withState(.running)
+
+            return try foregroundState(
+                for: activeAttachment,
+                configuredRepository: configuredRepository,
+                activeSession: self.activeSession,
+                pendingInput: pendingInput
+            )
         }
     }
 
     private func foregroundState(
         for artifact: PlanningArtifact,
         configuredRepository: ConfiguredRepository,
-        activeSession: AttachedSession?
+        activeSession: AttachedSession?,
+        pendingInput: PendingInputState
     ) throws -> ControlForegroundResponse {
         let attachedSessions = activeSession.map { [$0] } ?? []
         let sessionIsRunning = activeSession?.session.state == .running
@@ -348,8 +520,9 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
             planningArtifacts: [artifact],
             activePlanningArtifactID: artifact.id,
             attachedSessions: attachedSessions,
+            pendingInput: pendingInput,
             structuredActionAvailability: StructuredActionAvailability(
-                reply: StructuredActionState(isAvailable: false, reason: "No Agent Session"),
+                reply: replyActionState(for: pendingInput),
                 approve: StructuredActionState(isAvailable: false, reason: "No approval request"),
                 deny: StructuredActionState(isAvailable: false, reason: "No approval request"),
                 draftComment: StructuredActionState(
@@ -382,11 +555,96 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
             )
         )
     }
+
+    private func nextPendingInputState(
+        from signal: PendingInputSignal,
+        current: PendingInputState,
+        occurredAt: Date
+    ) -> PendingInputState {
+        switch (signal.source, signal.kind) {
+        case (.claudeCodeHook, .detected):
+            return PendingInputState(
+                status: .hookConfirmed,
+                source: .claudeCodeHook,
+                prompt: signal.prompt,
+                detectedAt: occurredAt
+            )
+        case (.tmuxHeuristic, .detected):
+            guard current.status != .hookConfirmed else {
+                return current
+            }
+            return PendingInputState(
+                status: .uncertain,
+                source: .tmuxHeuristic,
+                prompt: signal.prompt,
+                detectedAt: occurredAt
+            )
+        case (.claudeCodeHook, .cleared):
+            return .unavailable
+        case (.tmuxHeuristic, .cleared):
+            guard current.source == .tmuxHeuristic else {
+                return current
+            }
+            return .unavailable
+        }
+    }
+
+    private func replyActionState(for pendingInput: PendingInputState) -> StructuredActionState {
+        switch pendingInput.status {
+        case .unavailable:
+            return StructuredActionState(isAvailable: false, reason: "No Pending Input")
+        case .hookConfirmed:
+            return StructuredActionState(isAvailable: true, reason: "Hook-confirmed Pending Input")
+        case .uncertain:
+            return StructuredActionState(
+                isAvailable: true,
+                reason: "Uncertain Pending Input; confirmation required",
+                requiresConfirmation: true
+            )
+        }
+    }
+
+    private func lifecycleTitle(for pendingInput: PendingInputState) -> String {
+        switch pendingInput.status {
+        case .unavailable:
+            return "Pending Input cleared"
+        case .hookConfirmed:
+            return "Pending Input detected"
+        case .uncertain:
+            return "Uncertain Pending Input detected"
+        }
+    }
+
+    private func lifecycleDetail(for pendingInput: PendingInputState) -> String {
+        switch pendingInput.status {
+        case .unavailable:
+            return "The Wrapped Session no longer appears to be waiting for input."
+        case .hookConfirmed:
+            return pendingInput.prompt ?? "Claude Code hook reported Pending Input."
+        case .uncertain:
+            return pendingInput.prompt ?? "tmux output heuristics suggest Pending Input."
+        }
+    }
 }
 
 private struct WrappedSessionLaunchContext: Sendable {
     var planningArtifact: PlanningArtifact
     var repositoryURL: URL
+}
+
+private struct PendingInputReplyContext: Sendable {
+    var planningArtifact: PlanningArtifact
+    var activeSession: AttachedSession
+    var pendingInput: PendingInputState
+    var reply: String
+}
+
+private extension AttachedSession {
+    func withState(_ state: AgentSession.State) -> AttachedSession {
+        var nextSession = session
+        nextSession.state = state
+        return AttachedSession(planningArtifactID: planningArtifactID, session: nextSession)
+    }
 }
 
 private extension NSLock {

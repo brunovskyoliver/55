@@ -5,6 +5,7 @@ public struct ControlForegroundResponse: Codable, Equatable, Sendable {
     public var planningArtifacts: [PlanningArtifact]
     public var activePlanningArtifactID: PlanningArtifact.ID?
     public var attachedSessions: [AttachedSession]
+    public var pendingInput: PendingInputState
     public var structuredActionAvailability: StructuredActionAvailability
     public var fileReview: FileReviewPlaceholder
     public var auditTimeline: AuditTimelinePlaceholder
@@ -14,6 +15,7 @@ public struct ControlForegroundResponse: Codable, Equatable, Sendable {
         planningArtifacts: [PlanningArtifact],
         activePlanningArtifactID: PlanningArtifact.ID?,
         attachedSessions: [AttachedSession],
+        pendingInput: PendingInputState = .unavailable,
         structuredActionAvailability: StructuredActionAvailability,
         fileReview: FileReviewPlaceholder,
         auditTimeline: AuditTimelinePlaceholder
@@ -22,6 +24,7 @@ public struct ControlForegroundResponse: Codable, Equatable, Sendable {
         self.planningArtifacts = planningArtifacts
         self.activePlanningArtifactID = activePlanningArtifactID
         self.attachedSessions = attachedSessions
+        self.pendingInput = pendingInput
         self.structuredActionAvailability = structuredActionAvailability
         self.fileReview = fileReview
         self.auditTimeline = auditTimeline
@@ -169,10 +172,12 @@ public struct StructuredActionAvailability: Codable, Equatable, Sendable {
 public struct StructuredActionState: Codable, Equatable, Sendable {
     public var isAvailable: Bool
     public var reason: String
+    public var requiresConfirmation: Bool
 
-    public init(isAvailable: Bool, reason: String) {
+    public init(isAvailable: Bool, reason: String, requiresConfirmation: Bool = false) {
         self.isAvailable = isAvailable
         self.reason = reason
+        self.requiresConfirmation = requiresConfirmation
     }
 }
 

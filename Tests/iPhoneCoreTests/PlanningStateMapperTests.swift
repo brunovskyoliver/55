@@ -108,6 +108,48 @@ final class PlanningStateMapperTests: XCTestCase {
         XCTAssertEqual(state.auditTimeline.entries.first?.occurredAt, occurredAt)
     }
 
+    func testMapperCarriesUncertainReplyConfirmationRequirement() throws {
+        let response = ControlForegroundResponse(
+            planningArtifacts: [
+                PlanningArtifact(
+                    id: "issue-7",
+                    kind: .issue,
+                    number: 7,
+                    title: "Detect Pending Input and send guarded replies",
+                    url: URL(string: "https://github.com/brunovskyoliver/55/issues/7")!,
+                    state: "open"
+                )
+            ],
+            activePlanningArtifactID: "issue-7",
+            attachedSessions: [],
+            pendingInput: PendingInputState(
+                status: .uncertain,
+                source: .tmuxHeuristic,
+                prompt: "tmux prompt",
+                detectedAt: Date(timeIntervalSince1970: 40)
+            ),
+            structuredActionAvailability: StructuredActionAvailability(
+                reply: StructuredActionState(
+                    isAvailable: true,
+                    reason: "Uncertain Pending Input; confirmation required",
+                    requiresConfirmation: true
+                ),
+                approve: StructuredActionState(isAvailable: false, reason: "No approval request"),
+                deny: StructuredActionState(isAvailable: false, reason: "No approval request"),
+                draftComment: StructuredActionState(isAvailable: false, reason: "No draft"),
+                guardedStop: StructuredActionState(isAvailable: false, reason: "No session")
+            ),
+            fileReview: FileReviewPlaceholder(status: "placeholder", summary: "Unavailable", changedFileCount: 0),
+            auditTimeline: AuditTimelinePlaceholder(summary: "Audit Timeline", entries: [])
+        )
+
+        let state = try PlanningStateMapper().map(response)
+        let reply = try XCTUnwrap(state.structuredActions.first { $0.id == "reply" })
+
+        XCTAssertTrue(reply.isAvailable)
+        XCTAssertTrue(reply.requiresConfirmation)
+    }
+
     func testMapperRejectsMissingActivePlanningArtifact() {
         let response = ControlForegroundResponse(
             planningArtifacts: [],

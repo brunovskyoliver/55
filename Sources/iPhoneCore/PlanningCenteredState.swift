@@ -77,12 +77,20 @@ public struct StructuredActionSummary: Equatable, Identifiable, Sendable {
     public var title: String
     public var isAvailable: Bool
     public var reason: String
+    public var requiresConfirmation: Bool
 
-    public init(id: String, title: String, isAvailable: Bool, reason: String) {
+    public init(
+        id: String,
+        title: String,
+        isAvailable: Bool,
+        reason: String,
+        requiresConfirmation: Bool = false
+    ) {
         self.id = id
         self.title = title
         self.isAvailable = isAvailable
         self.reason = reason
+        self.requiresConfirmation = requiresConfirmation
     }
 }
 
@@ -201,7 +209,13 @@ public struct PlanningStateMapper: PlanningStateMapping {
     }
 
     private func actionSummary(id: String, title: String, state: StructuredActionState) -> StructuredActionSummary {
-        StructuredActionSummary(id: id, title: title, isAvailable: state.isAvailable, reason: state.reason)
+        StructuredActionSummary(
+            id: id,
+            title: title,
+            isAvailable: state.isAvailable,
+            reason: state.reason,
+            requiresConfirmation: state.requiresConfirmation
+        )
     }
 }
 

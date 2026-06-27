@@ -30,19 +30,25 @@ final class PlanningCenteredStore {
     var isLoading = false
     var isAttaching = false
     var isStartingSession = false
+    var isSubmittingReply = false
+    var replyText = ""
+    var isConfirmingUncertainReply = false
 
     private let loadState: @Sendable () async throws -> PlanningCenteredState
     private let attachPlanningArtifact: @Sendable (AttachPlanningArtifactRequest) async throws -> PlanningCenteredState
     private let startWrappedSession: @Sendable () async throws -> PlanningCenteredState
+    private let submitPendingInputReply: @Sendable (SubmitPendingInputReplyRequest) async throws -> PlanningCenteredState
 
     init(
         loadState: @escaping @Sendable () async throws -> PlanningCenteredState,
         attachPlanningArtifact: @escaping @Sendable (AttachPlanningArtifactRequest) async throws -> PlanningCenteredState,
-        startWrappedSession: @escaping @Sendable () async throws -> PlanningCenteredState
+        startWrappedSession: @escaping @Sendable () async throws -> PlanningCenteredState,
+        submitPendingInputReply: @escaping @Sendable (SubmitPendingInputReplyRequest) async throws -> PlanningCenteredState
     ) {
         self.loadState = loadState
         self.attachPlanningArtifact = attachPlanningArtifact
         self.startWrappedSession = startWrappedSession
+        self.submitPendingInputReply = submitPendingInputReply
     }
 
     func foregroundSync() async {
@@ -94,6 +100,31 @@ final class PlanningCenteredStore {
             errorText = "Wrapped Session start failed: \(error)"
         }
     }
+
+    func submitReply(confirmUncertainInput: Bool = false) async {
+        isSubmittingReply = true
+        defer { isSubmittingReply = false }
+
+        do {
+            state = try await submitPendingInputReply(
+                SubmitPendingInputReplyRequest(
+                    reply: replyText,
+                    confirmUncertainInput: confirmUncertainInput
+                )
+            )
+            replyText = ""
+            errorText = nil
+        } catch let error as ForegroundStateClientError {
+            switch error {
+            case .requestFailed(_, let message):
+                errorText = message
+            default:
+                errorText = "Pending Input reply failed: \(error)"
+            }
+        } catch {
+            errorText = "Pending Input reply failed: \(error)"
+        }
+    }
 }
 
 extension PlanningCenteredStore {
@@ -110,6 +141,11 @@ extension PlanningCenteredStore {
         let baseURL = URL(string: "https://127.0.0.1:5577")!
         let client = HTTPForegroundStateClient(baseURL: baseURL)
         let response = try await client.startWrappedSession()
+        return try PlanningStateMapper().map(response.foregroundState)
+    } submitPendingInputReply: { request in
+        let baseURL = URL(string: "https://127.0.0.1:5577")!
+        let client = HTTPForegroundStateClient(baseURL: baseURL)
+        let response = try await client.submitPendingInputReply(request)
         return try PlanningStateMapper().map(response.foregroundState)
     }
 }
@@ -168,7 +204,7 @@ struct PlanningCenteredView: View {
 
             AgentSessionSection(session: state.attachedSession, loader: loader)
 
-            StructuredActionsSection(actions: state.structuredActions)
+            StructuredActionsSection(actions: state.structuredActions, loader: loader)
             PlaceholderSection(summary: state.fileReview)
             AuditTimelineSection(summary: state.auditTimeline)
         }
@@ -273,25 +309,63 @@ struct AgentSessionSection: View {
 
 struct StructuredActionsSection: View {
     let actions: [StructuredActionSummary]
+    @Bindable var loader: PlanningCenteredStore
 
     var body: some View {
         Section("Structured Actions") {
             ForEach(actions) { action in
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(action.title)
-                            .font(.body)
-                        Text(action.reason)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                if action.id == "reply", action.isAvailable {
+                    VStack(alignment: .leading, spacing: 8) {
+                        actionHeader(action)
+                        TextField("Reply", text: $loader.replyText, axis: .vertical)
+                            .lineLimit(1...4)
+                            .textInputAutocapitalization(.sentences)
+                        Button {
+                            if action.requiresConfirmation {
+                                loader.isConfirmingUncertainReply = true
+                            } else {
+                                Task {
+                                    await loader.submitReply()
+                                }
+                            }
+                        } label: {
+                            Label("Send Reply", systemImage: "paperplane.fill")
+                        }
+                        .disabled(loader.replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || loader.isSubmittingReply)
+                        .confirmationDialog(
+                            "Send reply to uncertain Pending Input?",
+                            isPresented: $loader.isConfirmingUncertainReply,
+                            titleVisibility: .visible
+                        ) {
+                            Button("Send Reply", role: .destructive) {
+                                Task {
+                                    await loader.submitReply(confirmUncertainInput: true)
+                                }
+                            }
+                            Button("Cancel", role: .cancel) {}
+                        }
                     }
-                    Spacer()
-                    Image(systemName: action.isAvailable ? "checkmark.circle.fill" : "circle.slash")
-                        .foregroundStyle(action.isAvailable ? .green : .secondary)
-                        .accessibilityHidden(true)
+                } else {
+                    HStack {
+                        actionHeader(action)
+                        Spacer()
+                        Image(systemName: action.isAvailable ? "checkmark.circle.fill" : "circle.slash")
+                            .foregroundStyle(action.isAvailable ? .green : .secondary)
+                            .accessibilityHidden(true)
+                    }
+                    .accessibilityElement(children: .combine)
                 }
-                .accessibilityElement(children: .combine)
             }
+        }
+    }
+
+    private func actionHeader(_ action: StructuredActionSummary) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(action.title)
+                .font(.body)
+            Text(action.reason)
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 }
