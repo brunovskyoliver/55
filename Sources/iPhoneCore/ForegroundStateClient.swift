@@ -13,6 +13,10 @@ public protocol WrappedSessionStartClient: Sendable {
     func startWrappedSession(_ request: StartWrappedSessionRequest) async throws -> StartWrappedSessionResponse
 }
 
+public protocol WrappedSessionStopClient: Sendable {
+    func stopWrappedSession(_ request: StopWrappedSessionRequest) async throws -> StopWrappedSessionResponse
+}
+
 public protocol PendingInputReplyClient: Sendable {
     func submitPendingInputReply(_ request: SubmitPendingInputReplyRequest) async throws -> SubmitPendingInputReplyResponse
 }
@@ -119,6 +123,32 @@ extension HTTPForegroundStateClient: WrappedSessionStartClient {
         }
 
         return try decoder.decode(StartWrappedSessionResponse.self, from: data)
+    }
+}
+
+extension HTTPForegroundStateClient: WrappedSessionStopClient {
+    public func stopWrappedSession(_ request: StopWrappedSessionRequest) async throws -> StopWrappedSessionResponse {
+        guard baseURL.scheme == "https" else {
+            throw ForegroundStateClientError.pairedTLSRequired
+        }
+
+        var urlRequest = authorizedRequest(url: baseURL.appending(path: "v1/agent-session/stop"))
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.httpBody = try encoder.encode(request)
+
+        let (data, response) = try await session.data(for: urlRequest)
+
+        if let httpResponse = response as? HTTPURLResponse,
+           !(200..<300).contains(httpResponse.statusCode) {
+            let errorResponse = try? decoder.decode(ControlAPIErrorResponse.self, from: data)
+            throw ForegroundStateClientError.requestFailed(
+                statusCode: httpResponse.statusCode,
+                message: errorResponse?.message ?? "Wrapped Session stop failed."
+            )
+        }
+
+        return try decoder.decode(StopWrappedSessionResponse.self, from: data)
     }
 }
 

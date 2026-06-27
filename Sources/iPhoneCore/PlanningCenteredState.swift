@@ -451,8 +451,12 @@ private extension AgentSession.State {
             return "Waiting for Input"
         case .waitingForApproval:
             return "Waiting for Approval"
+        case .stopping:
+            return "Stopping"
         case .stopped:
             return "Stopped"
+        case .failedToStop:
+            return "Failed to Stop"
         }
     }
 }

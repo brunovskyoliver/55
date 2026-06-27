@@ -21,7 +21,7 @@ final class PlanningStateMapperTests: XCTestCase {
 
         let guardedStop = try XCTUnwrap(state.structuredActions.first { $0.id == "guarded-stop" })
         XCTAssertFalse(guardedStop.isAvailable)
-        XCTAssertEqual(guardedStop.reason, "No Agent Session")
+        XCTAssertEqual(guardedStop.reason, "No active Wrapped Session")
         XCTAssertNil(state.structuredActions.first { $0.id == "commit" })
         XCTAssertNil(state.structuredActions.first { $0.id == "push" })
     }
@@ -189,7 +189,11 @@ final class PlanningStateMapperTests: XCTestCase {
                 approve: StructuredActionState(isAvailable: true, reason: "Approve: Allow command?", requiresConfirmation: true),
                 deny: StructuredActionState(isAvailable: true, reason: "Deny: Allow command?", requiresConfirmation: true),
                 draftComment: StructuredActionState(isAvailable: false, reason: "No draft"),
-                guardedStop: StructuredActionState(isAvailable: true, reason: "Wrapped Session is active")
+                guardedStop: StructuredActionState(
+                    isAvailable: true,
+                    reason: "Wrapped Session is active",
+                    requiresConfirmation: true
+                )
             ),
             fileReview: FileReviewPlaceholder(status: "placeholder", summary: "Unavailable", changedFileCount: 0),
             auditTimeline: AuditTimelinePlaceholder(
@@ -217,6 +221,57 @@ final class PlanningStateMapperTests: XCTestCase {
         XCTAssertTrue(approve.requiresConfirmation)
         XCTAssertTrue(deny.isAvailable)
         XCTAssertTrue(deny.requiresConfirmation)
+        let guardedStop = try XCTUnwrap(state.structuredActions.first { $0.id == "guarded-stop" })
+        XCTAssertTrue(guardedStop.isAvailable)
+        XCTAssertTrue(guardedStop.requiresConfirmation)
+    }
+
+    func testMapperCarriesStoppingAndFailedToStopSessionStates() throws {
+        let response = ControlForegroundResponse(
+            planningArtifacts: [
+                PlanningArtifact(
+                    id: "issue-11",
+                    kind: .issue,
+                    number: 11,
+                    title: "Implement Guarded Stop",
+                    url: URL(string: "https://github.com/brunovskyoliver/55/issues/11")!,
+                    state: "open"
+                )
+            ],
+            activePlanningArtifactID: "issue-11",
+            attachedSessions: [
+                AttachedSession(
+                    planningArtifactID: "issue-11",
+                    session: AgentSession(
+                        id: "session-11",
+                        displayName: "Claude Code Wrapped Session",
+                        state: .failedToStop,
+                        summary: "Stop failed."
+                    )
+                )
+            ],
+            structuredActionAvailability: StructuredActionAvailability(
+                reply: StructuredActionState(isAvailable: false, reason: "No Pending Input"),
+                approve: StructuredActionState(isAvailable: false, reason: "No approval request"),
+                deny: StructuredActionState(isAvailable: false, reason: "No approval request"),
+                draftComment: StructuredActionState(isAvailable: false, reason: "No draft"),
+                guardedStop: StructuredActionState(
+                    isAvailable: true,
+                    reason: "Wrapped Session is active",
+                    requiresConfirmation: true
+                )
+            ),
+            fileReview: FileReviewPlaceholder(status: "placeholder", summary: "Unavailable", changedFileCount: 0),
+            auditTimeline: AuditTimelinePlaceholder(summary: "Audit Timeline", entries: [])
+        )
+
+        let failedState = try PlanningStateMapper().map(response)
+        XCTAssertEqual(failedState.attachedSession?.stateText, "Failed to Stop")
+
+        var stoppingResponse = response
+        stoppingResponse.attachedSessions[0].session.state = .stopping
+        let stoppingState = try PlanningStateMapper().map(stoppingResponse)
+        XCTAssertEqual(stoppingState.attachedSession?.stateText, "Stopping")
     }
 
     func testMapperCarriesFileReviewFiles() throws {

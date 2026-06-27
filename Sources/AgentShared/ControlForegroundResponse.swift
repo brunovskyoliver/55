@@ -76,7 +76,9 @@ public struct AgentSession: Codable, Equatable, Identifiable, Sendable {
         case running
         case waitingForInput
         case waitingForApproval
+        case stopping
         case stopped
+        case failedToStop
     }
 
     public var id: String

@@ -30,6 +30,7 @@ final class PlanningCenteredStore {
     var isLoading = false
     var isAttaching = false
     var isStartingSession = false
+    var isStoppingSession = false
     var isSubmittingReply = false
     var isSubmittingApprovalDecision = false
     var isPreparingDraftComment = false
@@ -37,12 +38,14 @@ final class PlanningCenteredStore {
     var replyText = ""
     var draftCommentBody = ""
     var isConfirmingUncertainReply = false
+    var isConfirmingStop = false
     var approvalDecisionToConfirm: ApprovalRequestDecision?
     var draftCommentDecisionToConfirm: DraftCommentDecision?
 
     private let loadState: @Sendable () async throws -> PlanningCenteredState
     private let attachPlanningArtifact: @Sendable (AttachPlanningArtifactRequest) async throws -> PlanningCenteredState
     private let startWrappedSession: @Sendable () async throws -> PlanningCenteredState
+    private let stopWrappedSession: @Sendable (StopWrappedSessionRequest) async throws -> PlanningCenteredState
     private let submitPendingInputReply: @Sendable (SubmitPendingInputReplyRequest) async throws -> PlanningCenteredState
     private let submitApprovalDecision: @Sendable (SubmitApprovalDecisionRequest) async throws -> PlanningCenteredState
     private let prepareDraftComment: @Sendable (PrepareDraftCommentRequest) async throws -> PlanningCenteredState
@@ -52,6 +55,7 @@ final class PlanningCenteredStore {
         loadState: @escaping @Sendable () async throws -> PlanningCenteredState,
         attachPlanningArtifact: @escaping @Sendable (AttachPlanningArtifactRequest) async throws -> PlanningCenteredState,
         startWrappedSession: @escaping @Sendable () async throws -> PlanningCenteredState,
+        stopWrappedSession: @escaping @Sendable (StopWrappedSessionRequest) async throws -> PlanningCenteredState,
         submitPendingInputReply: @escaping @Sendable (SubmitPendingInputReplyRequest) async throws -> PlanningCenteredState,
         submitApprovalDecision: @escaping @Sendable (SubmitApprovalDecisionRequest) async throws -> PlanningCenteredState,
         prepareDraftComment: @escaping @Sendable (PrepareDraftCommentRequest) async throws -> PlanningCenteredState,
@@ -60,6 +64,7 @@ final class PlanningCenteredStore {
         self.loadState = loadState
         self.attachPlanningArtifact = attachPlanningArtifact
         self.startWrappedSession = startWrappedSession
+        self.stopWrappedSession = stopWrappedSession
         self.submitPendingInputReply = submitPendingInputReply
         self.submitApprovalDecision = submitApprovalDecision
         self.prepareDraftComment = prepareDraftComment
@@ -113,6 +118,26 @@ final class PlanningCenteredStore {
             }
         } catch {
             errorText = "Wrapped Session start failed: \(error)"
+        }
+    }
+
+    func stopSession() async {
+        isStoppingSession = true
+        defer { isStoppingSession = false }
+
+        do {
+            updateState(try await stopWrappedSession(StopWrappedSessionRequest(confirmStop: true)))
+            isConfirmingStop = false
+            errorText = nil
+        } catch let error as ForegroundStateClientError {
+            switch error {
+            case .requestFailed(_, let message):
+                errorText = message
+            default:
+                errorText = "Wrapped Session stop failed: \(error)"
+            }
+        } catch {
+            errorText = "Wrapped Session stop failed: \(error)"
         }
     }
 
@@ -232,6 +257,11 @@ extension PlanningCenteredStore {
         let baseURL = URL(string: "https://127.0.0.1:5577")!
         let client = HTTPForegroundStateClient(baseURL: baseURL)
         let response = try await client.startWrappedSession()
+        return try PlanningStateMapper().map(response.foregroundState)
+    } stopWrappedSession: { request in
+        let baseURL = URL(string: "https://127.0.0.1:5577")!
+        let client = HTTPForegroundStateClient(baseURL: baseURL)
+        let response = try await client.stopWrappedSession(request)
         return try PlanningStateMapper().map(response.foregroundState)
     } submitPendingInputReply: { request in
         let baseURL = URL(string: "https://127.0.0.1:5577")!
@@ -564,6 +594,32 @@ struct StructuredActionsSection: View {
                                 Label("Prepare Draft", systemImage: "doc.text.magnifyingglass")
                             }
                             .disabled(!action.isAvailable || loader.isPreparingDraftComment)
+                        }
+                    }
+                } else if action.id == "guarded-stop" {
+                    if action.isAvailable {
+                        VStack(alignment: .leading, spacing: 8) {
+                            actionHeader(action)
+                            Button(role: .destructive) {
+                                loader.isConfirmingStop = true
+                            } label: {
+                                Label("Stop Session", systemImage: "stop.circle.fill")
+                            }
+                            .disabled(loader.isStoppingSession)
+                            .confirmationDialog(
+                                "Stop active Wrapped Session?",
+                                isPresented: $loader.isConfirmingStop,
+                                titleVisibility: .visible
+                            ) {
+                                Button("Stop Session", role: .destructive) {
+                                    Task {
+                                        await loader.stopSession()
+                                    }
+                                }
+                                Button("Cancel", role: .cancel) {
+                                    loader.isConfirmingStop = false
+                                }
+                            }
                         }
                     }
                 } else if pendingApprovalRequest == nil || (action.id != "approve" && action.id != "deny") {

@@ -29,6 +29,7 @@ public struct LocalControlAPIResponder: Sendable {
     private let provider: any ControlAPIProviding
     private let artifactAttacher: (any PlanningArtifactAttaching)?
     private let sessionStarter: (any WrappedSessionStarting)?
+    private let sessionStopSubmitter: (any WrappedSessionStopSubmitting)?
     private let pendingInputReplySubmitter: (any PendingInputReplySubmitting)?
     private let approvalDecisionSubmitter: (any ApprovalDecisionSubmitting)?
     private let draftCommentPreparer: (any DraftCommentPreparing)?
@@ -46,6 +47,7 @@ public struct LocalControlAPIResponder: Sendable {
         self.provider = provider
         self.artifactAttacher = provider as? any PlanningArtifactAttaching
         self.sessionStarter = provider as? any WrappedSessionStarting
+        self.sessionStopSubmitter = provider as? any WrappedSessionStopSubmitting
         self.pendingInputReplySubmitter = provider as? any PendingInputReplySubmitting
         self.approvalDecisionSubmitter = provider as? any ApprovalDecisionSubmitting
         self.draftCommentPreparer = provider as? any DraftCommentPreparing
@@ -89,6 +91,15 @@ public struct LocalControlAPIResponder: Sendable {
             }
 
             return wrappedSessionStartResponse(body: request.body)
+        }
+
+        if request.method == "POST", request.path == LocalControlAPIServer.wrappedSessionStopPath {
+            let authorization = securityPolicy.authorize(request: request, channelSecurity: channelSecurity)
+            guard case .authorized = authorization else {
+                return authorizationFailureResponse(authorization)
+            }
+
+            return wrappedSessionStopResponse(body: request.body)
         }
 
         if request.method == "POST", request.path == LocalControlAPIServer.pendingInputReplyPath {
@@ -323,6 +334,43 @@ public struct LocalControlAPIResponder: Sendable {
         }
     }
 
+    private func wrappedSessionStopResponse(body: Data) -> LocalControlAPIHTTPResponse {
+        guard let sessionStopSubmitter else {
+            return jsonErrorResponse(
+                status: "503 Service Unavailable",
+                statusCode: 503,
+                errorCode: "wrapped_session_stop_unavailable",
+                message: "This Mac Agent cannot stop a Wrapped Session."
+            )
+        }
+
+        do {
+            let request = body.isEmpty
+                ? StopWrappedSessionRequest()
+                : try decoder.decode(StopWrappedSessionRequest.self, from: body)
+            return LocalControlAPIHTTPResponse(
+                status: "200 OK",
+                statusCode: 200,
+                contentType: "application/json",
+                body: try encoder.encode(sessionStopSubmitter.stopWrappedSession(request))
+            )
+        } catch let error as WrappedSessionStopError {
+            return jsonErrorResponse(
+                status: wrappedSessionStopFailureStatus(for: error),
+                statusCode: wrappedSessionStopFailureStatusCode(for: error),
+                errorCode: error.apiErrorCode,
+                message: error.userMessage
+            )
+        } catch {
+            return jsonErrorResponse(
+                status: "400 Bad Request",
+                statusCode: 400,
+                errorCode: "wrapped_session_stop_failed",
+                message: "The Wrapped Session stop request could not be completed."
+            )
+        }
+    }
+
     private func planningArtifactAttachmentResponse(body: Data) -> LocalControlAPIHTTPResponse {
         guard let artifactAttacher else {
             return jsonErrorResponse(
@@ -518,6 +566,28 @@ public struct LocalControlAPIResponder: Sendable {
         }
     }
 
+    private func wrappedSessionStopFailureStatus(for error: WrappedSessionStopError) -> String {
+        switch error {
+        case .noActiveSession:
+            return "409 Conflict"
+        case .confirmationRequired:
+            return "400 Bad Request"
+        case .stopFailed:
+            return "502 Bad Gateway"
+        }
+    }
+
+    private func wrappedSessionStopFailureStatusCode(for error: WrappedSessionStopError) -> Int {
+        switch error {
+        case .noActiveSession:
+            return 409
+        case .confirmationRequired:
+            return 400
+        case .stopFailed:
+            return 502
+        }
+    }
+
     private func pendingInputReplyFailureStatus(for error: PendingInputReplyError) -> String {
         switch error {
         case .noActiveSession, .noPendingInput:
@@ -586,6 +656,7 @@ public final class LocalControlAPIServer: @unchecked Sendable {
     public static let pairingCompletionPath = "/v1/pairings/complete"
     public static let planningArtifactAttachmentPath = "/v1/planning-artifact/attachment"
     public static let wrappedSessionStartPath = "/v1/agent-session/start"
+    public static let wrappedSessionStopPath = "/v1/agent-session/stop"
     public static let pendingInputReplyPath = "/v1/pending-input/reply"
     public static let approvalDecisionPath = "/v1/approval-request/decision"
     public static let draftCommentPreparePath = "/v1/draft-comment/prepare"

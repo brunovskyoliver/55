@@ -13,6 +13,10 @@ public protocol WrappedSessionStarting: Sendable {
     func startWrappedSession(_ request: StartWrappedSessionRequest) throws -> StartWrappedSessionResponse
 }
 
+public protocol WrappedSessionStopSubmitting: Sendable {
+    func stopWrappedSession(_ request: StopWrappedSessionRequest) throws -> StopWrappedSessionResponse
+}
+
 public protocol PendingInputSignalAccepting: Sendable {
     func acceptPendingInputSignal(_ signal: PendingInputSignal) throws -> ControlForegroundResponse
 }
@@ -37,10 +41,11 @@ public protocol DraftCommentDecisionSubmitting: Sendable {
     func submitDraftCommentDecision(_ request: SubmitDraftCommentDecisionRequest) throws -> SubmitDraftCommentDecisionResponse
 }
 
-public final class DemoControlService: ControlAPIProviding, PlanningArtifactAttaching, WrappedSessionStarting, PendingInputSignalAccepting, PendingInputReplySubmitting, ApprovalRequestSignalAccepting, ApprovalDecisionSubmitting, DraftCommentPreparing, DraftCommentDecisionSubmitting, @unchecked Sendable {
+public final class DemoControlService: ControlAPIProviding, PlanningArtifactAttaching, WrappedSessionStarting, WrappedSessionStopSubmitting, PendingInputSignalAccepting, PendingInputReplySubmitting, ApprovalRequestSignalAccepting, ApprovalDecisionSubmitting, DraftCommentPreparing, DraftCommentDecisionSubmitting, @unchecked Sendable {
     private let resolver: any PlanningArtifactResolving
     private let baselineCapturer: any WorktreeBaselineCapturing
     private let tmuxLauncher: any TmuxLaunching
+    private let sessionStopper: any WrappedSessionStopping
     private let inputSender: any WrappedSessionInputSending
     private let approvalDecisionSender: any ApprovalDecisionSending
     private let commentPoster: any GitHubCommentPosting
@@ -55,6 +60,7 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
         configuredRepositoryURL: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
         baselineCapturer: any WorktreeBaselineCapturing = GitWorktreeBaselineCapturer(),
         tmuxLauncher: any TmuxLaunching = TmuxClaudeLauncher(),
+        sessionStopper: any WrappedSessionStopping = TmuxWrappedSessionStopper(),
         inputSender: any WrappedSessionInputSending = TmuxWrappedSessionInputSender(),
         approvalDecisionSender: any ApprovalDecisionSending = TmuxApprovalDecisionSender(),
         commentPoster: any GitHubCommentPosting = GitHubCLICommentPoster(),
@@ -71,6 +77,7 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
         self.resolver = resolver
         self.baselineCapturer = baselineCapturer
         self.tmuxLauncher = tmuxLauncher
+        self.sessionStopper = sessionStopper
         self.inputSender = inputSender
         self.approvalDecisionSender = approvalDecisionSender
         self.commentPoster = commentPoster
@@ -342,6 +349,100 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
         try state.foregroundState()
     }
 
+    public func stopWrappedSession(_ request: StopWrappedSessionRequest) throws -> StopWrappedSessionResponse {
+        let context = try state.prepareStop(request)
+        try state.append(
+            event(
+                planningArtifact: context.planningArtifact,
+                agentSessionID: context.activeSession.session.id,
+                eventType: .structuredActionAttempt,
+                title: "Guarded Stop requested",
+                detail: "The Owner Device confirmed stop for the active Wrapped Session.",
+                metadata: ["action": "guarded_stop"]
+            )
+        )
+        try state.append(
+            event(
+                planningArtifact: context.planningArtifact,
+                agentSessionID: context.activeSession.session.id,
+                eventType: .sessionLifecycle,
+                title: "Wrapped Session stopping",
+                detail: "The Mac Agent is attempting graceful interrupt before termination fallback.",
+                metadata: ["state": AgentSession.State.stopping.rawValue]
+            )
+        )
+
+        do {
+            let result = try sessionStopper.stopWrappedSession(context.activeSession)
+            let foregroundState = try state.completeStop(
+                resultEvent: event(
+                    planningArtifact: context.planningArtifact,
+                    agentSessionID: context.activeSession.session.id,
+                    eventType: .structuredActionResult,
+                    title: result.method == .gracefulInterrupt
+                        ? "Guarded Stop graceful interrupt succeeded"
+                        : "Guarded Stop termination fallback succeeded",
+                    detail: result.summary,
+                    metadata: [
+                        "action": "guarded_stop",
+                        "method": result.method.rawValue,
+                        "result": "success"
+                    ]
+                ),
+                lifecycleEvent: event(
+                    planningArtifact: context.planningArtifact,
+                    agentSessionID: context.activeSession.session.id,
+                    eventType: .sessionLifecycle,
+                    title: "Wrapped Session stopped",
+                    detail: result.summary,
+                    metadata: ["state": AgentSession.State.stopped.rawValue]
+                )
+            )
+            return StopWrappedSessionResponse(foregroundState: foregroundState)
+        } catch let error as WrappedSessionStopError {
+            try? state.failStop(
+                resultEvent: event(
+                    planningArtifact: context.planningArtifact,
+                    agentSessionID: context.activeSession.session.id,
+                    eventType: .structuredActionResult,
+                    title: "Guarded Stop failed",
+                    detail: error.userMessage,
+                    metadata: ["action": "guarded_stop", "result": "failure"]
+                ),
+                lifecycleEvent: event(
+                    planningArtifact: context.planningArtifact,
+                    agentSessionID: context.activeSession.session.id,
+                    eventType: .sessionLifecycle,
+                    title: "Wrapped Session failed to stop",
+                    detail: error.userMessage,
+                    metadata: ["state": AgentSession.State.failedToStop.rawValue]
+                )
+            )
+            throw error
+        } catch {
+            let stopError = WrappedSessionStopError.stopFailed(String(describing: error))
+            try? state.failStop(
+                resultEvent: event(
+                    planningArtifact: context.planningArtifact,
+                    agentSessionID: context.activeSession.session.id,
+                    eventType: .structuredActionResult,
+                    title: "Guarded Stop failed",
+                    detail: stopError.userMessage,
+                    metadata: ["action": "guarded_stop", "result": "failure"]
+                ),
+                lifecycleEvent: event(
+                    planningArtifact: context.planningArtifact,
+                    agentSessionID: context.activeSession.session.id,
+                    eventType: .sessionLifecycle,
+                    title: "Wrapped Session failed to stop",
+                    detail: stopError.userMessage,
+                    metadata: ["state": AgentSession.State.failedToStop.rawValue]
+                )
+            )
+            throw stopError
+        }
+    }
+
     public func attachPlanningArtifact(_ request: AttachPlanningArtifactRequest) throws -> AttachPlanningArtifactResponse {
         let artifact = try resolver.resolve(request)
         let foregroundState = try state.store(
@@ -591,7 +692,7 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
                 throw WrappedSessionLaunchError.noActivePlanningArtifact
             }
 
-            if let activeSession, activeSession.session.state == .running {
+            if let activeSession, activeSession.session.state.isActiveWrappedSession {
                 throw WrappedSessionLaunchError.activeSessionAlreadyRunning(activeSession.session.id)
             }
 
@@ -617,7 +718,7 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
         lifecycleEvent: SessionEventLogEntry
     ) throws -> StartWrappedSessionResponse {
         try lock.withLock {
-            if let activeSession, activeSession.session.state == .running {
+            if let activeSession, activeSession.session.state.isActiveWrappedSession {
                 throw WrappedSessionLaunchError.activeSessionAlreadyRunning(activeSession.session.id)
             }
 
@@ -651,13 +752,78 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
         }
     }
 
+    func prepareStop(_ request: StopWrappedSessionRequest) throws -> WrappedSessionStopContext {
+        try lock.withLock {
+            guard request.confirmStop else {
+                throw WrappedSessionStopError.confirmationRequired
+            }
+
+            guard let activeAttachment, let activeSession, activeSession.session.state.isActiveWrappedSession else {
+                throw WrappedSessionStopError.noActiveSession
+            }
+
+            let stoppingSession = activeSession.withState(.stopping)
+            self.activeSession = stoppingSession
+            pendingInput = .unavailable
+            pendingApprovalRequest = nil
+
+            return WrappedSessionStopContext(
+                planningArtifact: activeAttachment,
+                activeSession: stoppingSession
+            )
+        }
+    }
+
+    func completeStop(
+        resultEvent: SessionEventLogEntry,
+        lifecycleEvent: SessionEventLogEntry
+    ) throws -> ControlForegroundResponse {
+        try lock.withLock {
+            guard let activeAttachment, let activeSession else {
+                throw WrappedSessionStopError.noActiveSession
+            }
+
+            try sessionStore.append(resultEvent)
+            try sessionStore.append(lifecycleEvent)
+            pendingInput = .unavailable
+            pendingApprovalRequest = nil
+            self.activeSession = activeSession.withState(.stopped)
+
+            return try foregroundState(
+                for: activeAttachment,
+                configuredRepository: configuredRepository,
+                activeSession: self.activeSession,
+                pendingInput: pendingInput,
+                pendingApprovalRequest: pendingApprovalRequest,
+                draftComment: pendingDraftComment
+            )
+        }
+    }
+
+    func failStop(
+        resultEvent: SessionEventLogEntry,
+        lifecycleEvent: SessionEventLogEntry
+    ) throws {
+        try lock.withLock {
+            guard let activeSession else {
+                throw WrappedSessionStopError.noActiveSession
+            }
+
+            try sessionStore.append(resultEvent)
+            try sessionStore.append(lifecycleEvent)
+            pendingInput = .unavailable
+            pendingApprovalRequest = nil
+            self.activeSession = activeSession.withState(.failedToStop)
+        }
+    }
+
     func acceptPendingInputSignal(
         _ signal: PendingInputSignal,
         occurredAt: Date,
         eventID: String
     ) throws -> ControlForegroundResponse {
         try lock.withLock {
-            guard let activeAttachment, let activeSession else {
+            guard let activeAttachment, let activeSession, activeSession.session.state.isActiveWrappedSession else {
                 throw PendingInputReplyError.noActiveSession
             }
 
@@ -698,7 +864,7 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
         eventID: String
     ) throws -> ControlForegroundResponse {
         try lock.withLock {
-            guard let activeAttachment, let activeSession else {
+            guard let activeAttachment, let activeSession, activeSession.session.state.isActiveWrappedSession else {
                 throw ApprovalDecisionError.noActiveSession
             }
 
@@ -742,7 +908,7 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
 
     func preparePendingInputReply(_ request: SubmitPendingInputReplyRequest) throws -> PendingInputReplyContext {
         try lock.withLock {
-            guard let activeAttachment, let activeSession else {
+            guard let activeAttachment, let activeSession, activeSession.session.state.isActiveWrappedSession else {
                 throw PendingInputReplyError.noActiveSession
             }
 
@@ -770,7 +936,7 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
 
     func prepareApprovalDecision(_ request: SubmitApprovalDecisionRequest) throws -> ApprovalDecisionContext {
         try lock.withLock {
-            guard let activeAttachment, let activeSession else {
+            guard let activeAttachment, let activeSession, activeSession.session.state.isActiveWrappedSession else {
                 throw ApprovalDecisionError.noActiveSession
             }
 
@@ -1010,7 +1176,7 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
         draftComment: DraftCommentState
     ) throws -> ControlForegroundResponse {
         let attachedSessions = activeSession.map { [$0] } ?? []
-        let hasActiveSession = activeSession?.session.state != nil && activeSession?.session.state != .stopped
+        let hasActiveSession = activeSession?.session.state.isActiveWrappedSession == true
         let auditEvents = try sessionStore.query(
             SessionEventQuery(planningArtifactID: artifact.id, limit: 20)
         )
@@ -1036,7 +1202,8 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
                 ),
                 guardedStop: StructuredActionState(
                     isAvailable: hasActiveSession,
-                    reason: hasActiveSession ? "Wrapped Session is active" : "No Agent Session"
+                    reason: hasActiveSession ? "Wrapped Session is active" : "No active Wrapped Session",
+                    requiresConfirmation: hasActiveSession
                 )
             ),
             fileReview: fileReviewBuilder.buildFileReview(
@@ -1168,6 +1335,11 @@ private struct WrappedSessionLaunchContext: Sendable {
     var repositoryURL: URL
 }
 
+private struct WrappedSessionStopContext: Sendable {
+    var planningArtifact: PlanningArtifact
+    var activeSession: AttachedSession
+}
+
 private struct PendingInputReplyContext: Sendable {
     var planningArtifact: PlanningArtifact
     var activeSession: AttachedSession
@@ -1195,6 +1367,17 @@ private extension AttachedSession {
         var nextSession = session
         nextSession.state = state
         return AttachedSession(planningArtifactID: planningArtifactID, session: nextSession)
+    }
+}
+
+private extension AgentSession.State {
+    var isActiveWrappedSession: Bool {
+        switch self {
+        case .running, .waitingForInput, .waitingForApproval, .stopping, .failedToStop:
+            return true
+        case .idle, .stopped:
+            return false
+        }
     }
 }
 
