@@ -27,19 +27,47 @@ public struct LocalControlAPIHTTPResponse: Equatable, Sendable {
 
 public struct LocalControlAPIResponder: Sendable {
     private let provider: any ControlAPIProviding
+    private let pairingService: MacPairingService?
+    private let securityPolicy: ControlAPISecurityPolicy
     private let encoder: JSONEncoder
+    private let decoder: JSONDecoder
 
-    public init(provider: any ControlAPIProviding) {
+    public init(
+        provider: any ControlAPIProviding,
+        pairingService: MacPairingService? = nil,
+        securityPolicy: ControlAPISecurityPolicy
+    ) {
         self.provider = provider
+        self.pairingService = pairingService
+        self.securityPolicy = securityPolicy
         self.encoder = JSONEncoder()
         self.encoder.dateEncodingStrategy = .iso8601
+        self.decoder = JSONDecoder()
+        self.decoder.dateDecodingStrategy = .iso8601
     }
 
-    public func response(for request: String) -> LocalControlAPIHTTPResponse {
-        let firstLine = request.split(separator: "\r\n", maxSplits: 1).first ?? ""
+    public func response(
+        for rawRequest: String,
+        channelSecurity: ControlAPIChannelSecurity = .plainHTTP
+    ) -> LocalControlAPIHTTPResponse {
+        let request = ParsedLocalControlAPIRequest(rawRequest: rawRequest)
 
-        if firstLine.hasPrefix("GET \(LocalControlAPIServer.foregroundStatePath) ") {
+        if request.method == "GET", request.path == LocalControlAPIServer.foregroundStatePath {
+            let authorization = securityPolicy.authorize(request: request, channelSecurity: channelSecurity)
+            guard case .authorized = authorization else {
+                return authorizationFailureResponse(authorization)
+            }
+
             return foregroundStateResponse()
+        }
+
+        if request.method == "POST", request.path == LocalControlAPIServer.pairingCompletionPath {
+            let authorization = securityPolicy.authorizePairingCompletion(channelSecurity: channelSecurity)
+            guard case .authorized = authorization else {
+                return authorizationFailureResponse(authorization)
+            }
+
+            return pairingCompletionResponse(body: request.body)
         }
 
         return LocalControlAPIHTTPResponse(
@@ -48,6 +76,32 @@ public struct LocalControlAPIResponder: Sendable {
             contentType: "text/plain; charset=utf-8",
             body: Data("Not Found".utf8)
         )
+    }
+
+    private func pairingCompletionResponse(body: Data) -> LocalControlAPIHTTPResponse {
+        guard let pairingService else {
+            return jsonErrorResponse(
+                status: "503 Service Unavailable",
+                statusCode: 503,
+                errorCode: "pairing_unavailable"
+            )
+        }
+
+        do {
+            let request = try decoder.decode(PairingCompletionRequest.self, from: body)
+            return LocalControlAPIHTTPResponse(
+                status: "200 OK",
+                statusCode: 200,
+                contentType: "application/json",
+                body: try encoder.encode(pairingService.completePairing(request))
+            )
+        } catch MacPairingServiceError.invitationExpired {
+            return jsonErrorResponse(status: "410 Gone", statusCode: 410, errorCode: "pairing_invitation_expired")
+        } catch MacPairingServiceError.unknownInvitation, MacPairingServiceError.invalidInvitationSecret {
+            return jsonErrorResponse(status: "401 Unauthorized", statusCode: 401, errorCode: "pairing_invitation_invalid")
+        } catch {
+            return jsonErrorResponse(status: "400 Bad Request", statusCode: 400, errorCode: "pairing_failed")
+        }
     }
 
     private func foregroundStateResponse() -> LocalControlAPIHTTPResponse {
@@ -67,21 +121,58 @@ public struct LocalControlAPIResponder: Sendable {
             )
         }
     }
+
+    private func authorizationFailureResponse(_ result: PairedControlAPIAuthorizationResult) -> LocalControlAPIHTTPResponse {
+        switch result {
+        case .authorized:
+            return jsonErrorResponse(status: "500 Internal Server Error", statusCode: 500, errorCode: "authorization_state_invalid")
+        case .requiresTLS:
+            return jsonErrorResponse(status: "426 Upgrade Required", statusCode: 426, errorCode: "paired_tls_required")
+        case .missingIdentity:
+            return jsonErrorResponse(status: "401 Unauthorized", statusCode: 401, errorCode: "paired_identity_required")
+        case .invalidIdentity:
+            return jsonErrorResponse(status: "403 Forbidden", statusCode: 403, errorCode: "paired_identity_invalid")
+        case .secretStoreUnavailable:
+            return jsonErrorResponse(status: "503 Service Unavailable", statusCode: 503, errorCode: "pairing_secret_store_unavailable")
+        }
+    }
+
+    private func jsonErrorResponse(status: String, statusCode: Int, errorCode: String) -> LocalControlAPIHTTPResponse {
+        LocalControlAPIHTTPResponse(
+            status: status,
+            statusCode: statusCode,
+            contentType: "application/json",
+            body: Data("{\"error\":\"\(errorCode)\"}".utf8)
+        )
+    }
 }
 
 public final class LocalControlAPIServer: @unchecked Sendable {
     public static let foregroundStatePath = "/v1/foreground-state"
+    public static let pairingCompletionPath = "/v1/pairings/complete"
 
     private let responder: LocalControlAPIResponder
     private let requestedPort: UInt16
+    private let channelSecurity: ControlAPIChannelSecurity
     private let lock = NSLock()
     private var socketFileDescriptor: Int32 = -1
     private var isStopping = false
     private var serverThread: Thread?
 
-    public init(provider: any ControlAPIProviding, port: UInt16 = 5577) {
-        self.responder = LocalControlAPIResponder(provider: provider)
+    public init(
+        provider: any ControlAPIProviding,
+        pairingService: MacPairingService? = nil,
+        securityPolicy: ControlAPISecurityPolicy,
+        channelSecurity: ControlAPIChannelSecurity = .plainHTTP,
+        port: UInt16 = 5577
+    ) {
+        self.responder = LocalControlAPIResponder(
+            provider: provider,
+            pairingService: pairingService,
+            securityPolicy: securityPolicy
+        )
         self.requestedPort = port
+        self.channelSecurity = channelSecurity
     }
 
     deinit {
@@ -141,7 +232,8 @@ public final class LocalControlAPIServer: @unchecked Sendable {
         serverThread = thread
         thread.start()
 
-        return URL(string: "http://127.0.0.1:\(port)")!
+        let scheme = channelSecurity == .pairedTLS ? "https" : "http"
+        return URL(string: "\(scheme)://127.0.0.1:\(port)")!
     }
 
     public func stop() {
@@ -184,7 +276,10 @@ public final class LocalControlAPIServer: @unchecked Sendable {
             return
         }
 
-        let response = responder.response(for: String(decoding: buffer.prefix(byteCount), as: UTF8.self))
+        let response = responder.response(
+            for: String(decoding: buffer.prefix(byteCount), as: UTF8.self),
+            channelSecurity: channelSecurity
+        )
         writeResponse(response, to: fileDescriptor)
     }
 
@@ -232,6 +327,41 @@ private extension NSLock {
         lock()
         defer { unlock() }
         return operation()
+    }
+}
+
+struct ParsedLocalControlAPIRequest: Sendable {
+    var method: String
+    var path: String
+    var headers: [String: String]
+    var body: Data
+
+    init(rawRequest: String) {
+        let parts = rawRequest.components(separatedBy: "\r\n\r\n")
+        let headerBlock = parts.first ?? ""
+        body = Data(parts.dropFirst().joined(separator: "\r\n\r\n").utf8)
+
+        let lines = headerBlock.components(separatedBy: "\r\n")
+        let firstLineParts = (lines.first ?? "").split(separator: " ")
+        method = firstLineParts.first.map(String.init) ?? ""
+
+        if firstLineParts.count > 1 {
+            path = String(firstLineParts[1]).split(separator: "?", maxSplits: 1).first.map(String.init) ?? ""
+        } else {
+            path = ""
+        }
+
+        var parsedHeaders: [String: String] = [:]
+        for line in lines.dropFirst() {
+            guard let separator = line.firstIndex(of: ":") else {
+                continue
+            }
+
+            let name = line[..<separator].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let value = line[line.index(after: separator)...].trimmingCharacters(in: .whitespacesAndNewlines)
+            parsedHeaders[name] = value
+        }
+        headers = parsedHeaders
     }
 }
 #endif

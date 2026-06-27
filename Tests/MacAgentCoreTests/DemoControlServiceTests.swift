@@ -18,7 +18,10 @@ final class DemoControlServiceTests: XCTestCase {
 
     #if os(macOS)
     func testLocalControlAPIResponderBuildsForegroundStateResponse() throws {
-        let responder = LocalControlAPIResponder(provider: DemoControlService())
+        let responder = LocalControlAPIResponder(
+            provider: DemoControlService(),
+            securityPolicy: .unsecuredDemo
+        )
 
         let httpResponse = responder.response(for: "GET /v1/foreground-state HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
 
@@ -34,7 +37,11 @@ final class DemoControlServiceTests: XCTestCase {
     }
 
     func testLocalControlAPIExposesForegroundStateResponse() async throws {
-        let server = LocalControlAPIServer(provider: DemoControlService(), port: 0)
+        let server = LocalControlAPIServer(
+            provider: DemoControlService(),
+            securityPolicy: .unsecuredDemo,
+            port: 0
+        )
         let baseURL: URL
         do {
             baseURL = try server.start()

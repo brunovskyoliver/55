@@ -50,7 +50,7 @@ final class PlanningCenteredStore {
 
 extension PlanningCenteredStore {
     static let localDemoAPI = PlanningCenteredStore {
-        let baseURL = URL(string: "http://127.0.0.1:5577")!
+        let baseURL = URL(string: "https://127.0.0.1:5577")!
         return try await ForegroundStateLoader(client: HTTPForegroundStateClient(baseURL: baseURL)).load()
     }
 }
