@@ -7,7 +7,7 @@ public struct PlanningCenteredState: Equatable, Sendable {
     public var attachedSession: AttachedSessionSummary?
     public var structuredActions: [StructuredActionSummary]
     public var fileReview: PlaceholderSummary
-    public var auditTimeline: PlaceholderSummary
+    public var auditTimeline: AuditTimelineSummary
 
     public init(
         configuredRepositoryPath: String? = nil,
@@ -15,7 +15,7 @@ public struct PlanningCenteredState: Equatable, Sendable {
         attachedSession: AttachedSessionSummary?,
         structuredActions: [StructuredActionSummary],
         fileReview: PlaceholderSummary,
-        auditTimeline: PlaceholderSummary
+        auditTimeline: AuditTimelineSummary
     ) {
         self.configuredRepositoryPath = configuredRepositoryPath
         self.activePlanningArtifact = activePlanningArtifact
@@ -96,6 +96,30 @@ public struct PlaceholderSummary: Equatable, Sendable {
     }
 }
 
+public struct AuditTimelineSummary: Equatable, Sendable {
+    public var title: String
+    public var entries: [AuditTimelineItemSummary]
+
+    public init(title: String, entries: [AuditTimelineItemSummary]) {
+        self.title = title
+        self.entries = entries
+    }
+}
+
+public struct AuditTimelineItemSummary: Equatable, Identifiable, Sendable {
+    public var id: String
+    public var title: String
+    public var detail: String
+    public var occurredAt: Date
+
+    public init(id: String, title: String, detail: String, occurredAt: Date) {
+        self.id = id
+        self.title = title
+        self.detail = detail
+        self.occurredAt = occurredAt
+    }
+}
+
 public protocol PlanningStateMapping: Sendable {
     func map(_ response: ControlForegroundResponse) throws -> PlanningCenteredState
 }
@@ -121,9 +145,16 @@ public struct PlanningStateMapper: PlanningStateMapping {
                 title: "File Review",
                 detail: "\(response.fileReview.summary) Changed files: \(response.fileReview.changedFileCount)."
             ),
-            auditTimeline: PlaceholderSummary(
+            auditTimeline: AuditTimelineSummary(
                 title: response.auditTimeline.summary,
-                detail: response.auditTimeline.entries.first?.detail ?? "No audit events yet."
+                entries: response.auditTimeline.entries.map {
+                    AuditTimelineItemSummary(
+                        id: $0.id,
+                        title: $0.title,
+                        detail: $0.detail,
+                        occurredAt: $0.occurredAt
+                    )
+                }
             )
         )
     }

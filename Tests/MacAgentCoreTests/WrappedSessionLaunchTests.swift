@@ -101,9 +101,11 @@ final class WrappedSessionLaunchTests: XCTestCase {
     }
 
     func testTmuxLaunchFailureDoesNotStoreActiveSession() throws {
+        let store = SQLiteSessionStore.inMemory()
         let service = launchableService(
             baseline: .clean,
-            tmuxLauncher: FakeTmuxLauncher(error: .tmuxLaunchFailed("tmux is unavailable"))
+            tmuxLauncher: FakeTmuxLauncher(error: .tmuxLaunchFailed("tmux is unavailable")),
+            sessionStore: store
         )
         _ = try service.attachPlanningArtifact(AttachPlanningArtifactRequest(kind: .issue, reference: "5"))
 
@@ -114,6 +116,10 @@ final class WrappedSessionLaunchTests: XCTestCase {
         let foregroundState = try service.foregroundState()
         XCTAssertEqual(foregroundState.attachedSessions.count, 0)
         XCTAssertFalse(foregroundState.structuredActionAvailability.guardedStop.isAvailable)
+        XCTAssertEqual(
+            try store.query(SessionEventQuery(planningArtifactID: "issue-5")).map(\.eventType),
+            [.planningArtifactAttached, .structuredActionAttempt, .structuredActionResult]
+        )
     }
 
     func testSuccessfulWrappedSessionStateMapsForIPhone() throws {
@@ -145,18 +151,36 @@ final class WrappedSessionLaunchTests: XCTestCase {
         XCTAssertEqual(launch.attachedSession.session.id, "session-5")
         XCTAssertEqual(launch.foregroundState.attachedSessions.first?.session.tmuxAttachment?.sessionName, "agent-issue-5")
     }
+
+    func testWrappedSessionLaunchRecordsAuditTimelineEvents() throws {
+        let store = SQLiteSessionStore.inMemory()
+        let service = launchableService(baseline: .clean, sessionStore: store)
+        _ = try service.attachPlanningArtifact(AttachPlanningArtifactRequest(kind: .issue, reference: "5"))
+
+        let response = try service.startWrappedSession()
+        let storedEvents = try store.query(SessionEventQuery(planningArtifactID: "issue-5"))
+
+        XCTAssertEqual(
+            storedEvents.map(\.eventType),
+            [.planningArtifactAttached, .structuredActionAttempt, .structuredActionResult, .sessionLifecycle]
+        )
+        XCTAssertEqual(storedEvents.filter { $0.agentSessionID == "session-5" }.count, 3)
+        XCTAssertEqual(response.foregroundState.auditTimeline.entries.map(\.title), storedEvents.map(\.title))
+    }
 }
 
 private func launchableService(
     baseline: FakeBaselineCapturer.Baseline,
     tmuxLauncher: FakeTmuxLauncher = FakeTmuxLauncher(),
-    events: RecordedLaunchEvents = RecordedLaunchEvents()
+    events: RecordedLaunchEvents = RecordedLaunchEvents(),
+    sessionStore: any SessionEventStoring = SQLiteSessionStore.inMemory()
 ) -> DemoControlService {
     DemoControlService(
         resolver: StaticPlanningArtifactResolver(),
         configuredRepositoryURL: URL(fileURLWithPath: "/repo"),
         baselineCapturer: FakeBaselineCapturer(baseline: baseline, events: events),
         tmuxLauncher: tmuxLauncher,
+        sessionStore: sessionStore,
         sessionIDGenerator: { "session-5" }
     )
 }

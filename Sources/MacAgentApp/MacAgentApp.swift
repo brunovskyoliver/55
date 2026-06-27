@@ -29,7 +29,7 @@ final class MacAgentRuntime: ObservableObject {
     @Published var baselineText = "Unavailable"
     @Published var errorText: String?
 
-    private let service = DemoControlService()
+    private let service = DemoControlService(sessionStore: SQLiteSessionStore.applicationSupportStore())
     private let secretStore: KeychainPairingSecretStore
     private let pairingService: MacPairingService
     private var server: LocalControlAPIServer?

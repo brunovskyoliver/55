@@ -14,7 +14,8 @@ final class DemoControlServiceTests: XCTestCase {
         XCTAssertEqual(response.attachedSessions.count, 0)
         XCTAssertFalse(response.structuredActionAvailability.guardedStop.isAvailable)
         XCTAssertEqual(response.fileReview.status, "placeholder")
-        XCTAssertEqual(response.auditTimeline.entries.count, 1)
+        XCTAssertEqual(response.auditTimeline.summary, "Audit Timeline")
+        XCTAssertEqual(response.auditTimeline.entries.count, 0)
     }
 
     #if os(macOS)

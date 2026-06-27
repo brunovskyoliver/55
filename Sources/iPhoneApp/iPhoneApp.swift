@@ -170,7 +170,7 @@ struct PlanningCenteredView: View {
 
             StructuredActionsSection(actions: state.structuredActions)
             PlaceholderSection(summary: state.fileReview)
-            PlaceholderSection(summary: state.auditTimeline)
+            AuditTimelineSection(summary: state.auditTimeline)
         }
         .listStyle(.insetGrouped)
     }
@@ -304,6 +304,34 @@ struct PlaceholderSection: View {
             Text(summary.detail)
                 .font(.callout)
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+struct AuditTimelineSection: View {
+    let summary: AuditTimelineSummary
+
+    var body: some View {
+        Section(summary.title) {
+            if summary.entries.isEmpty {
+                Text("No audit events yet.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(summary.entries) { entry in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(entry.title)
+                            .font(.body)
+                        Text(entry.detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(entry.occurredAt, style: .time)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+            }
         }
     }
 }
