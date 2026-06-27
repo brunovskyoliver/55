@@ -28,11 +28,17 @@ final class PlanningCenteredStore {
     var state: PlanningCenteredState?
     var errorText: String?
     var isLoading = false
+    var isAttaching = false
 
     private let loadState: @Sendable () async throws -> PlanningCenteredState
+    private let attachPlanningArtifact: @Sendable (AttachPlanningArtifactRequest) async throws -> PlanningCenteredState
 
-    init(loadState: @escaping @Sendable () async throws -> PlanningCenteredState) {
+    init(
+        loadState: @escaping @Sendable () async throws -> PlanningCenteredState,
+        attachPlanningArtifact: @escaping @Sendable (AttachPlanningArtifactRequest) async throws -> PlanningCenteredState
+    ) {
         self.loadState = loadState
+        self.attachPlanningArtifact = attachPlanningArtifact
     }
 
     func foregroundSync() async {
@@ -46,12 +52,37 @@ final class PlanningCenteredStore {
             errorText = "Foreground Sync failed: \(error)"
         }
     }
+
+    func attach(kind: PlanningArtifact.Kind, reference: String) async {
+        isAttaching = true
+        defer { isAttaching = false }
+
+        do {
+            state = try await attachPlanningArtifact(AttachPlanningArtifactRequest(kind: kind, reference: reference))
+            errorText = nil
+        } catch let error as ForegroundStateClientError {
+            switch error {
+            case .requestFailed(_, let message):
+                errorText = message
+            default:
+                errorText = "Planning Artifact attachment failed: \(error)"
+            }
+        } catch {
+            errorText = "Planning Artifact attachment failed: \(error)"
+        }
+    }
 }
 
 extension PlanningCenteredStore {
     static let localDemoAPI = PlanningCenteredStore {
         let baseURL = URL(string: "https://127.0.0.1:5577")!
-        return try await ForegroundStateLoader(client: HTTPForegroundStateClient(baseURL: baseURL)).load()
+        let client = HTTPForegroundStateClient(baseURL: baseURL)
+        return try await ForegroundStateLoader(client: client).load()
+    } attachPlanningArtifact: { request in
+        let baseURL = URL(string: "https://127.0.0.1:5577")!
+        let client = HTTPForegroundStateClient(baseURL: baseURL)
+        let response = try await client.attachPlanningArtifact(request)
+        return try PlanningStateMapper().map(response.foregroundState)
     }
 }
 
@@ -66,13 +97,16 @@ struct PlanningCenteredRootView: View {
         NavigationStack {
             Group {
                 if let state = loader.state {
-                    PlanningCenteredView(state: state)
+                    PlanningCenteredView(state: state, loader: loader)
                 } else {
-                    ContentUnavailableView(
-                        "No Foreground State",
-                        systemImage: "iphone.and.arrow.forward",
-                        description: Text(loader.errorText ?? "Open the app to request the current Planning Artifact and Agent Session.")
-                    )
+                    List {
+                        PlanningArtifactAttachmentSection(loader: loader)
+                        ContentUnavailableView(
+                            "No Foreground State",
+                            systemImage: "iphone.and.arrow.forward",
+                            description: Text(loader.errorText ?? "Open the app to request the current Planning Artifact and Agent Session.")
+                        )
+                    }
                 }
             }
             .navigationTitle("Planning")
@@ -97,9 +131,11 @@ struct PlanningCenteredRootView: View {
 
 struct PlanningCenteredView: View {
     let state: PlanningCenteredState
+    let loader: PlanningCenteredStore
 
     var body: some View {
         List {
+            PlanningArtifactAttachmentSection(loader: loader)
             PlanningArtifactSection(artifact: state.activePlanningArtifact)
 
             if let attachedSession = state.attachedSession {
@@ -123,6 +159,9 @@ struct PlanningArtifactSection: View {
                 Text(artifact.label)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Text(artifact.affordanceTitle)
+                    .font(.subheadline)
+                    .foregroundStyle(artifact.affordanceTitle == "PR Review" ? .purple : .blue)
                 Text(artifact.title)
                     .font(.headline)
                 Text(artifact.state)
@@ -130,6 +169,36 @@ struct PlanningArtifactSection: View {
                     .foregroundStyle(.secondary)
             }
             .accessibilityElement(children: .combine)
+        }
+    }
+}
+
+struct PlanningArtifactAttachmentSection: View {
+    @Bindable var loader: PlanningCenteredStore
+    @State private var selectedKind: PlanningArtifact.Kind = .issue
+    @State private var reference = ""
+
+    var body: some View {
+        Section("Attach Planning Artifact") {
+            Picker("Type", selection: $selectedKind) {
+                ForEach(PlanningArtifact.Kind.allCases, id: \.rawValue) { kind in
+                    Text(kind.displayName).tag(kind)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            TextField("Issue or PR number or URL", text: $reference)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+
+            Button {
+                Task {
+                    await loader.attach(kind: selectedKind, reference: reference)
+                }
+            } label: {
+                Label("Attach", systemImage: "link")
+            }
+            .disabled(reference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || loader.isAttaching)
         }
     }
 }
@@ -187,6 +256,17 @@ struct PlaceholderSection: View {
             Text(summary.detail)
                 .font(.callout)
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private extension PlanningArtifact.Kind {
+    var displayName: String {
+        switch self {
+        case .issue:
+            return "Issue"
+        case .pullRequest:
+            return "PR"
         }
     }
 }

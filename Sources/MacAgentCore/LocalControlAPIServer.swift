@@ -27,6 +27,7 @@ public struct LocalControlAPIHTTPResponse: Equatable, Sendable {
 
 public struct LocalControlAPIResponder: Sendable {
     private let provider: any ControlAPIProviding
+    private let artifactAttacher: (any PlanningArtifactAttaching)?
     private let pairingService: MacPairingService?
     private let securityPolicy: ControlAPISecurityPolicy
     private let encoder: JSONEncoder
@@ -38,6 +39,7 @@ public struct LocalControlAPIResponder: Sendable {
         securityPolicy: ControlAPISecurityPolicy
     ) {
         self.provider = provider
+        self.artifactAttacher = provider as? any PlanningArtifactAttaching
         self.pairingService = pairingService
         self.securityPolicy = securityPolicy
         self.encoder = JSONEncoder()
@@ -61,6 +63,15 @@ public struct LocalControlAPIResponder: Sendable {
             return foregroundStateResponse()
         }
 
+        if request.method == "POST", request.path == LocalControlAPIServer.planningArtifactAttachmentPath {
+            let authorization = securityPolicy.authorize(request: request, channelSecurity: channelSecurity)
+            guard case .authorized = authorization else {
+                return authorizationFailureResponse(authorization)
+            }
+
+            return planningArtifactAttachmentResponse(body: request.body)
+        }
+
         if request.method == "POST", request.path == LocalControlAPIServer.pairingCompletionPath {
             let authorization = securityPolicy.authorizePairingCompletion(channelSecurity: channelSecurity)
             guard case .authorized = authorization else {
@@ -78,12 +89,48 @@ public struct LocalControlAPIResponder: Sendable {
         )
     }
 
+    private func planningArtifactAttachmentResponse(body: Data) -> LocalControlAPIHTTPResponse {
+        guard let artifactAttacher else {
+            return jsonErrorResponse(
+                status: "503 Service Unavailable",
+                statusCode: 503,
+                errorCode: "planning_artifact_attachment_unavailable",
+                message: "This Mac Agent cannot attach a planning artifact."
+            )
+        }
+
+        do {
+            let request = try decoder.decode(AttachPlanningArtifactRequest.self, from: body)
+            return LocalControlAPIHTTPResponse(
+                status: "200 OK",
+                statusCode: 200,
+                contentType: "application/json",
+                body: try encoder.encode(artifactAttacher.attachPlanningArtifact(request))
+            )
+        } catch let error as PlanningArtifactResolutionError {
+            return jsonErrorResponse(
+                status: attachmentFailureStatus(for: error),
+                statusCode: attachmentFailureStatusCode(for: error),
+                errorCode: error.apiErrorCode,
+                message: error.userMessage
+            )
+        } catch {
+            return jsonErrorResponse(
+                status: "400 Bad Request",
+                statusCode: 400,
+                errorCode: "planning_artifact_attachment_failed",
+                message: "The Planning Artifact attachment request could not be completed."
+            )
+        }
+    }
+
     private func pairingCompletionResponse(body: Data) -> LocalControlAPIHTTPResponse {
         guard let pairingService else {
             return jsonErrorResponse(
                 status: "503 Service Unavailable",
                 statusCode: 503,
-                errorCode: "pairing_unavailable"
+                errorCode: "pairing_unavailable",
+                message: "Pairing is unavailable on this Mac Agent."
             )
         }
 
@@ -96,11 +143,26 @@ public struct LocalControlAPIResponder: Sendable {
                 body: try encoder.encode(pairingService.completePairing(request))
             )
         } catch MacPairingServiceError.invitationExpired {
-            return jsonErrorResponse(status: "410 Gone", statusCode: 410, errorCode: "pairing_invitation_expired")
+            return jsonErrorResponse(
+                status: "410 Gone",
+                statusCode: 410,
+                errorCode: "pairing_invitation_expired",
+                message: "The pairing invitation has expired."
+            )
         } catch MacPairingServiceError.unknownInvitation, MacPairingServiceError.invalidInvitationSecret {
-            return jsonErrorResponse(status: "401 Unauthorized", statusCode: 401, errorCode: "pairing_invitation_invalid")
+            return jsonErrorResponse(
+                status: "401 Unauthorized",
+                statusCode: 401,
+                errorCode: "pairing_invitation_invalid",
+                message: "The pairing invitation is invalid."
+            )
         } catch {
-            return jsonErrorResponse(status: "400 Bad Request", statusCode: 400, errorCode: "pairing_failed")
+            return jsonErrorResponse(
+                status: "400 Bad Request",
+                statusCode: 400,
+                errorCode: "pairing_failed",
+                message: "Pairing failed."
+            )
         }
     }
 
@@ -117,7 +179,7 @@ public struct LocalControlAPIResponder: Sendable {
                 status: "500 Internal Server Error",
                 statusCode: 500,
                 contentType: "application/json",
-                body: Data("{\"error\":\"foreground_state_unavailable\"}".utf8)
+                body: encodedErrorBody(errorCode: "foreground_state_unavailable", message: "Foreground state is unavailable.")
             )
         }
     }
@@ -125,31 +187,88 @@ public struct LocalControlAPIResponder: Sendable {
     private func authorizationFailureResponse(_ result: PairedControlAPIAuthorizationResult) -> LocalControlAPIHTTPResponse {
         switch result {
         case .authorized:
-            return jsonErrorResponse(status: "500 Internal Server Error", statusCode: 500, errorCode: "authorization_state_invalid")
+            return jsonErrorResponse(
+                status: "500 Internal Server Error",
+                statusCode: 500,
+                errorCode: "authorization_state_invalid",
+                message: "Authorization reached an invalid state."
+            )
         case .requiresTLS:
-            return jsonErrorResponse(status: "426 Upgrade Required", statusCode: 426, errorCode: "paired_tls_required")
+            return jsonErrorResponse(
+                status: "426 Upgrade Required",
+                statusCode: 426,
+                errorCode: "paired_tls_required",
+                message: "The Control API requires the paired TLS channel."
+            )
         case .missingIdentity:
-            return jsonErrorResponse(status: "401 Unauthorized", statusCode: 401, errorCode: "paired_identity_required")
+            return jsonErrorResponse(
+                status: "401 Unauthorized",
+                statusCode: 401,
+                errorCode: "paired_identity_required",
+                message: "Paired owner device credentials are required."
+            )
         case .invalidIdentity:
-            return jsonErrorResponse(status: "403 Forbidden", statusCode: 403, errorCode: "paired_identity_invalid")
+            return jsonErrorResponse(
+                status: "403 Forbidden",
+                statusCode: 403,
+                errorCode: "paired_identity_invalid",
+                message: "Paired owner device credentials are invalid."
+            )
         case .secretStoreUnavailable:
-            return jsonErrorResponse(status: "503 Service Unavailable", statusCode: 503, errorCode: "pairing_secret_store_unavailable")
+            return jsonErrorResponse(
+                status: "503 Service Unavailable",
+                statusCode: 503,
+                errorCode: "pairing_secret_store_unavailable",
+                message: "Pairing secret material is unavailable."
+            )
         }
     }
 
-    private func jsonErrorResponse(status: String, statusCode: Int, errorCode: String) -> LocalControlAPIHTTPResponse {
+    private func jsonErrorResponse(status: String, statusCode: Int, errorCode: String, message: String) -> LocalControlAPIHTTPResponse {
         LocalControlAPIHTTPResponse(
             status: status,
             statusCode: statusCode,
             contentType: "application/json",
-            body: Data("{\"error\":\"\(errorCode)\"}".utf8)
+            body: encodedErrorBody(errorCode: errorCode, message: message)
         )
+    }
+
+    private func encodedErrorBody(errorCode: String, message: String) -> Data {
+        (try? encoder.encode(ControlAPIErrorResponse(error: errorCode, message: message)))
+            ?? Data("{\"error\":\"\(errorCode)\",\"message\":\"\(message)\"}".utf8)
+    }
+
+    private func attachmentFailureStatus(for error: PlanningArtifactResolutionError) -> String {
+        switch error {
+        case .missingReference:
+            return "400 Bad Request"
+        case .artifactNotFound:
+            return "404 Not Found"
+        case .ghUnauthenticated:
+            return "401 Unauthorized"
+        case .invalidGitHubResponse, .ghFailed:
+            return "502 Bad Gateway"
+        }
+    }
+
+    private func attachmentFailureStatusCode(for error: PlanningArtifactResolutionError) -> Int {
+        switch error {
+        case .missingReference:
+            return 400
+        case .artifactNotFound:
+            return 404
+        case .ghUnauthenticated:
+            return 401
+        case .invalidGitHubResponse, .ghFailed:
+            return 502
+        }
     }
 }
 
 public final class LocalControlAPIServer: @unchecked Sendable {
     public static let foregroundStatePath = "/v1/foreground-state"
     public static let pairingCompletionPath = "/v1/pairings/complete"
+    public static let planningArtifactAttachmentPath = "/v1/planning-artifact/attachment"
 
     private let responder: LocalControlAPIResponder
     private let requestedPort: UInt16

@@ -10,6 +10,7 @@ final class PlanningStateMapperTests: XCTestCase {
 
         XCTAssertEqual(state.activePlanningArtifact.id, "issue-2")
         XCTAssertEqual(state.activePlanningArtifact.label, "Issue #2")
+        XCTAssertEqual(state.activePlanningArtifact.affordanceTitle, "Issue Planning")
         XCTAssertEqual(state.activePlanningArtifact.state, "Open")
         XCTAssertEqual(state.attachedSession?.id, "demo-session-1")
         XCTAssertEqual(state.attachedSession?.stateText, "Running")
@@ -29,6 +30,37 @@ final class PlanningStateMapperTests: XCTestCase {
 
         XCTAssertEqual(state.activePlanningArtifact.title, "Scaffold Apple App Codebase with a demo Control API path")
         XCTAssertEqual(state.attachedSession?.summary, "Foreground Sync is connected to the seeded Mac Agent response.")
+    }
+
+    func testMapperDistinguishesPRReviewAffordance() throws {
+        let response = ControlForegroundResponse(
+            planningArtifacts: [
+                PlanningArtifact(
+                    id: "pr-4",
+                    kind: .pullRequest,
+                    number: 4,
+                    title: "Review wrapped session launch",
+                    url: URL(string: "https://github.com/brunovskyoliver/55/pull/4")!,
+                    state: "open"
+                )
+            ],
+            activePlanningArtifactID: "pr-4",
+            attachedSessions: [],
+            structuredActionAvailability: StructuredActionAvailability(
+                reply: StructuredActionState(isAvailable: false, reason: "No Pending Input"),
+                approve: StructuredActionState(isAvailable: false, reason: "No approval request"),
+                deny: StructuredActionState(isAvailable: false, reason: "No approval request"),
+                draftComment: StructuredActionState(isAvailable: false, reason: "No draft"),
+                guardedStop: StructuredActionState(isAvailable: false, reason: "No session")
+            ),
+            fileReview: FileReviewPlaceholder(status: "placeholder", summary: "Unavailable", changedFileCount: 0),
+            auditTimeline: AuditTimelinePlaceholder(summary: "Audit Timeline placeholder", entries: [])
+        )
+
+        let state = try PlanningStateMapper().map(response)
+
+        XCTAssertEqual(state.activePlanningArtifact.label, "PR #4")
+        XCTAssertEqual(state.activePlanningArtifact.affordanceTitle, "PR Review")
     }
 
     func testMapperRejectsMissingActivePlanningArtifact() {

@@ -5,11 +5,26 @@ public protocol ControlAPIProviding: Sendable {
     func foregroundState() throws -> ControlForegroundResponse
 }
 
-public struct DemoControlService: ControlAPIProviding {
-    public init() {}
+public protocol PlanningArtifactAttaching: Sendable {
+    func attachPlanningArtifact(_ request: AttachPlanningArtifactRequest) throws -> AttachPlanningArtifactResponse
+}
+
+public final class DemoControlService: ControlAPIProviding, PlanningArtifactAttaching, @unchecked Sendable {
+    private let resolver: any PlanningArtifactResolving
+    private let state = LockedDemoControlServiceState()
+
+    public init(resolver: any PlanningArtifactResolving = GitHubPlanningArtifactResolver()) {
+        self.resolver = resolver
+    }
 
     public func foregroundState() throws -> ControlForegroundResponse {
-        Self.seededForegroundState
+        state.foregroundState()
+    }
+
+    public func attachPlanningArtifact(_ request: AttachPlanningArtifactRequest) throws -> AttachPlanningArtifactResponse {
+        let artifact = try resolver.resolve(request)
+        let foregroundState = state.store(artifact)
+        return AttachPlanningArtifactResponse(planningArtifact: artifact, foregroundState: foregroundState)
     }
 }
 
@@ -61,4 +76,70 @@ public extension DemoControlService {
             ]
         )
     )
+}
+
+private final class LockedDemoControlServiceState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var activeAttachment: PlanningArtifact?
+
+    func foregroundState() -> ControlForegroundResponse {
+        lock.withLock {
+            guard let activeAttachment else {
+                return DemoControlService.seededForegroundState
+            }
+
+            return Self.foregroundState(for: activeAttachment)
+        }
+    }
+
+    func store(_ attachment: PlanningArtifact) -> ControlForegroundResponse {
+        lock.withLock {
+            activeAttachment = attachment
+            return Self.foregroundState(for: attachment)
+        }
+    }
+
+    private static func foregroundState(for artifact: PlanningArtifact) -> ControlForegroundResponse {
+        ControlForegroundResponse(
+            planningArtifacts: [artifact],
+            activePlanningArtifactID: artifact.id,
+            attachedSessions: [],
+            structuredActionAvailability: StructuredActionAvailability(
+                reply: StructuredActionState(isAvailable: false, reason: "No Agent Session"),
+                approve: StructuredActionState(isAvailable: false, reason: "No approval request"),
+                deny: StructuredActionState(isAvailable: false, reason: "No approval request"),
+                draftComment: StructuredActionState(
+                    isAvailable: artifact.kind == .issue,
+                    reason: artifact.kind == .issue
+                        ? "Issue planning comment can be prepared in a later slice"
+                        : "PR review comments arrive in a later slice"
+                ),
+                guardedStop: StructuredActionState(isAvailable: false, reason: "No Agent Session")
+            ),
+            fileReview: FileReviewPlaceholder(
+                status: "placeholder",
+                summary: "File Review is unavailable until a Wrapped Session starts.",
+                changedFileCount: 0
+            ),
+            auditTimeline: AuditTimelinePlaceholder(
+                summary: "Audit Timeline placeholder",
+                entries: [
+                    AuditTimelineEntry(
+                        id: "event-active-artifact-\(artifact.id)",
+                        title: "Planning Artifact attached",
+                        detail: "\(artifact.kind == .issue ? "Issue" : "Pull Request") #\(artifact.number) is active.",
+                        occurredAt: Date(timeIntervalSince1970: 1_787_800_000)
+                    )
+                ]
+            )
+        )
+    }
+}
+
+private extension NSLock {
+    func withLock<Value>(_ operation: () throws -> Value) rethrows -> Value {
+        lock()
+        defer { unlock() }
+        return try operation()
+    }
 }

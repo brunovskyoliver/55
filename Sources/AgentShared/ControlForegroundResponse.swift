@@ -26,7 +26,7 @@ public struct ControlForegroundResponse: Codable, Equatable, Sendable {
 }
 
 public struct PlanningArtifact: Codable, Equatable, Identifiable, Sendable {
-    public enum Kind: String, Codable, Equatable, Sendable {
+    public enum Kind: String, Codable, Equatable, CaseIterable, Sendable {
         case issue
         case pullRequest
     }

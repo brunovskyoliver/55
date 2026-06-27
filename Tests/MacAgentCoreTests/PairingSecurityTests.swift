@@ -84,7 +84,8 @@ final class PairingSecurityTests: XCTestCase {
         )
 
         XCTAssertEqual(response.statusCode, 401)
-        XCTAssertEqual(String(decoding: response.body, as: UTF8.self), "{\"error\":\"paired_identity_required\"}")
+        let error = try? JSONDecoder().decode(ControlAPIErrorResponse.self, from: response.body)
+        XCTAssertEqual(error?.error, "paired_identity_required")
     }
 
     func testControlAPIAcceptsPairedForegroundStateRequest() throws {

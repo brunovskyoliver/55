@@ -26,13 +26,15 @@ public struct PlanningCenteredState: Equatable, Sendable {
 public struct PlanningArtifactSummary: Equatable, Identifiable, Sendable {
     public var id: String
     public var label: String
+    public var affordanceTitle: String
     public var title: String
     public var state: String
     public var url: URL
 
-    public init(id: String, label: String, title: String, state: String, url: URL) {
+    public init(id: String, label: String, affordanceTitle: String, title: String, state: String, url: URL) {
         self.id = id
         self.label = label
+        self.affordanceTitle = affordanceTitle
         self.title = title
         self.state = state
         self.url = url
@@ -120,6 +122,7 @@ public struct PlanningStateMapper: PlanningStateMapping {
         PlanningArtifactSummary(
             id: artifact.id,
             label: artifact.kind == .issue ? "Issue #\(artifact.number)" : "PR #\(artifact.number)",
+            affordanceTitle: artifact.kind == .issue ? "Issue Planning" : "PR Review",
             title: artifact.title,
             state: artifact.state.capitalized,
             url: artifact.url
