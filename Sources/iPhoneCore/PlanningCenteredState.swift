@@ -6,6 +6,7 @@ public struct PlanningCenteredState: Equatable, Sendable {
     public var activePlanningArtifact: PlanningArtifactSummary
     public var attachedSession: AttachedSessionSummary?
     public var pendingApprovalRequest: ApprovalRequestSummary?
+    public var draftComment: DraftCommentSummary?
     public var structuredActions: [StructuredActionSummary]
     public var fileReview: FileReviewSummary
     public var auditTimeline: AuditTimelineSummary
@@ -15,6 +16,7 @@ public struct PlanningCenteredState: Equatable, Sendable {
         activePlanningArtifact: PlanningArtifactSummary,
         attachedSession: AttachedSessionSummary?,
         pendingApprovalRequest: ApprovalRequestSummary? = nil,
+        draftComment: DraftCommentSummary? = nil,
         structuredActions: [StructuredActionSummary],
         fileReview: FileReviewSummary,
         auditTimeline: AuditTimelineSummary
@@ -23,6 +25,7 @@ public struct PlanningCenteredState: Equatable, Sendable {
         self.activePlanningArtifact = activePlanningArtifact
         self.attachedSession = attachedSession
         self.pendingApprovalRequest = pendingApprovalRequest
+        self.draftComment = draftComment
         self.structuredActions = structuredActions
         self.fileReview = fileReview
         self.auditTimeline = auditTimeline
@@ -108,6 +111,31 @@ public struct ApprovalRequestSummary: Equatable, Identifiable, Sendable {
         self.title = title
         self.detail = detail
         self.requestedAt = requestedAt
+    }
+}
+
+public struct DraftCommentSummary: Equatable, Identifiable, Sendable {
+    public var id: String
+    public var title: String
+    public var body: String
+    public var statusText: String
+    public var requiresApproval: Bool
+    public var failureMessage: String?
+
+    public init(
+        id: String,
+        title: String,
+        body: String,
+        statusText: String,
+        requiresApproval: Bool,
+        failureMessage: String? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.body = body
+        self.statusText = statusText
+        self.requiresApproval = requiresApproval
+        self.failureMessage = failureMessage
     }
 }
 
@@ -237,6 +265,7 @@ public struct PlanningStateMapper: PlanningStateMapping {
             activePlanningArtifact: artifactSummary(activeArtifact),
             attachedSession: attachedSession,
             pendingApprovalRequest: response.pendingApprovalRequest.map(approvalRequestSummary),
+            draftComment: draftCommentSummary(response.draftComment),
             structuredActions: actionSummaries(response.structuredActionAvailability),
             fileReview: fileReviewSummary(response.fileReview),
             auditTimeline: AuditTimelineSummary(
@@ -313,6 +342,21 @@ public struct PlanningStateMapper: PlanningStateMapping {
         )
     }
 
+    private func draftCommentSummary(_ draftComment: DraftCommentState) -> DraftCommentSummary? {
+        guard draftComment.status != .unavailable else {
+            return nil
+        }
+
+        return DraftCommentSummary(
+            id: draftComment.id,
+            title: draftComment.title,
+            body: draftComment.body,
+            statusText: draftComment.status.displayTitle,
+            requiresApproval: draftComment.requiresApproval,
+            failureMessage: draftComment.failureMessage
+        )
+    }
+
     private func fileReviewSummary(_ fileReview: FileReviewState) -> FileReviewSummary {
         FileReviewSummary(
             title: "File Review",
@@ -375,6 +419,23 @@ private extension FileReviewFile.ChangeKind {
             return "Type Changed"
         case .unknown:
             return "Changed"
+        }
+    }
+}
+
+private extension DraftCommentState.Status {
+    var displayTitle: String {
+        switch self {
+        case .unavailable:
+            return "Unavailable"
+        case .prepared:
+            return "Prepared"
+        case .posted:
+            return "Posted"
+        case .rejected:
+            return "Rejected"
+        case .failed:
+            return "Failed"
         }
     }
 }

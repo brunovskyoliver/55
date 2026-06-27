@@ -32,28 +32,38 @@ final class PlanningCenteredStore {
     var isStartingSession = false
     var isSubmittingReply = false
     var isSubmittingApprovalDecision = false
+    var isPreparingDraftComment = false
+    var isSubmittingDraftCommentDecision = false
     var replyText = ""
+    var draftCommentBody = ""
     var isConfirmingUncertainReply = false
     var approvalDecisionToConfirm: ApprovalRequestDecision?
+    var draftCommentDecisionToConfirm: DraftCommentDecision?
 
     private let loadState: @Sendable () async throws -> PlanningCenteredState
     private let attachPlanningArtifact: @Sendable (AttachPlanningArtifactRequest) async throws -> PlanningCenteredState
     private let startWrappedSession: @Sendable () async throws -> PlanningCenteredState
     private let submitPendingInputReply: @Sendable (SubmitPendingInputReplyRequest) async throws -> PlanningCenteredState
     private let submitApprovalDecision: @Sendable (SubmitApprovalDecisionRequest) async throws -> PlanningCenteredState
+    private let prepareDraftComment: @Sendable (PrepareDraftCommentRequest) async throws -> PlanningCenteredState
+    private let submitDraftCommentDecision: @Sendable (SubmitDraftCommentDecisionRequest) async throws -> PlanningCenteredState
 
     init(
         loadState: @escaping @Sendable () async throws -> PlanningCenteredState,
         attachPlanningArtifact: @escaping @Sendable (AttachPlanningArtifactRequest) async throws -> PlanningCenteredState,
         startWrappedSession: @escaping @Sendable () async throws -> PlanningCenteredState,
         submitPendingInputReply: @escaping @Sendable (SubmitPendingInputReplyRequest) async throws -> PlanningCenteredState,
-        submitApprovalDecision: @escaping @Sendable (SubmitApprovalDecisionRequest) async throws -> PlanningCenteredState
+        submitApprovalDecision: @escaping @Sendable (SubmitApprovalDecisionRequest) async throws -> PlanningCenteredState,
+        prepareDraftComment: @escaping @Sendable (PrepareDraftCommentRequest) async throws -> PlanningCenteredState,
+        submitDraftCommentDecision: @escaping @Sendable (SubmitDraftCommentDecisionRequest) async throws -> PlanningCenteredState
     ) {
         self.loadState = loadState
         self.attachPlanningArtifact = attachPlanningArtifact
         self.startWrappedSession = startWrappedSession
         self.submitPendingInputReply = submitPendingInputReply
         self.submitApprovalDecision = submitApprovalDecision
+        self.prepareDraftComment = prepareDraftComment
+        self.submitDraftCommentDecision = submitDraftCommentDecision
     }
 
     func foregroundSync() async {
@@ -61,7 +71,7 @@ final class PlanningCenteredStore {
         defer { isLoading = false }
 
         do {
-            state = try await loadState()
+            updateState(try await loadState())
             errorText = nil
         } catch {
             errorText = "Foreground Sync failed: \(error)"
@@ -73,7 +83,7 @@ final class PlanningCenteredStore {
         defer { isAttaching = false }
 
         do {
-            state = try await attachPlanningArtifact(AttachPlanningArtifactRequest(kind: kind, reference: reference))
+            updateState(try await attachPlanningArtifact(AttachPlanningArtifactRequest(kind: kind, reference: reference)))
             errorText = nil
         } catch let error as ForegroundStateClientError {
             switch error {
@@ -92,7 +102,7 @@ final class PlanningCenteredStore {
         defer { isStartingSession = false }
 
         do {
-            state = try await startWrappedSession()
+            updateState(try await startWrappedSession())
             errorText = nil
         } catch let error as ForegroundStateClientError {
             switch error {
@@ -111,12 +121,12 @@ final class PlanningCenteredStore {
         defer { isSubmittingReply = false }
 
         do {
-            state = try await submitPendingInputReply(
+            updateState(try await submitPendingInputReply(
                 SubmitPendingInputReplyRequest(
                     reply: replyText,
                     confirmUncertainInput: confirmUncertainInput
                 )
-            )
+            ))
             replyText = ""
             errorText = nil
         } catch let error as ForegroundStateClientError {
@@ -136,9 +146,9 @@ final class PlanningCenteredStore {
         defer { isSubmittingApprovalDecision = false }
 
         do {
-            state = try await submitApprovalDecision(
+            updateState(try await submitApprovalDecision(
                 SubmitApprovalDecisionRequest(requestID: requestID, decision: decision)
-            )
+            ))
             approvalDecisionToConfirm = nil
             errorText = nil
         } catch let error as ForegroundStateClientError {
@@ -150,6 +160,60 @@ final class PlanningCenteredStore {
             }
         } catch {
             errorText = "Approval decision failed: \(error)"
+        }
+    }
+
+    func prepareDraft() async {
+        isPreparingDraftComment = true
+        defer { isPreparingDraftComment = false }
+
+        do {
+            updateState(try await prepareDraftComment(PrepareDraftCommentRequest(forceRegenerate: true)))
+            errorText = nil
+        } catch let error as ForegroundStateClientError {
+            switch error {
+            case .requestFailed(_, let message):
+                errorText = message
+            default:
+                errorText = "Draft Comment preparation failed: \(error)"
+            }
+        } catch {
+            errorText = "Draft Comment preparation failed: \(error)"
+        }
+    }
+
+    func decideDraftComment(_ decision: DraftCommentDecision, draftID: String) async {
+        isSubmittingDraftCommentDecision = true
+        defer { isSubmittingDraftCommentDecision = false }
+
+        do {
+            let request = SubmitDraftCommentDecisionRequest(
+                draftID: draftID,
+                decision: decision,
+                approvedBody: decision == .approve ? draftCommentBody : nil
+            )
+            updateState(try await submitDraftCommentDecision(request))
+            draftCommentDecisionToConfirm = nil
+            errorText = nil
+        } catch let error as ForegroundStateClientError {
+            switch error {
+            case .requestFailed(_, let message):
+                errorText = message
+            default:
+                errorText = "Draft Comment decision failed: \(error)"
+            }
+        } catch {
+            errorText = "Draft Comment decision failed: \(error)"
+        }
+    }
+
+    private func updateState(_ nextState: PlanningCenteredState) {
+        state = nextState
+        if let draftComment = nextState.draftComment {
+            draftCommentBody = draftComment.body
+        } else {
+            draftCommentBody = ""
+            draftCommentDecisionToConfirm = nil
         }
     }
 }
@@ -178,6 +242,16 @@ extension PlanningCenteredStore {
         let baseURL = URL(string: "https://127.0.0.1:5577")!
         let client = HTTPForegroundStateClient(baseURL: baseURL)
         let response = try await client.submitApprovalDecision(request)
+        return try PlanningStateMapper().map(response.foregroundState)
+    } prepareDraftComment: { request in
+        let baseURL = URL(string: "https://127.0.0.1:5577")!
+        let client = HTTPForegroundStateClient(baseURL: baseURL)
+        let response = try await client.prepareDraftComment(request)
+        return try PlanningStateMapper().map(response.foregroundState)
+    } submitDraftCommentDecision: { request in
+        let baseURL = URL(string: "https://127.0.0.1:5577")!
+        let client = HTTPForegroundStateClient(baseURL: baseURL)
+        let response = try await client.submitDraftCommentDecision(request)
         return try PlanningStateMapper().map(response.foregroundState)
     }
 }
@@ -239,6 +313,7 @@ struct PlanningCenteredView: View {
             StructuredActionsSection(
                 actions: state.structuredActions,
                 pendingApprovalRequest: state.pendingApprovalRequest,
+                draftComment: state.draftComment,
                 loader: loader
             )
             FileReviewSection(summary: state.fileReview)
@@ -346,6 +421,7 @@ struct AgentSessionSection: View {
 struct StructuredActionsSection: View {
     let actions: [StructuredActionSummary]
     let pendingApprovalRequest: ApprovalRequestSummary?
+    let draftComment: DraftCommentSummary?
     @Bindable var loader: PlanningCenteredStore
 
     var body: some View {
@@ -391,6 +467,59 @@ struct StructuredActionsSection: View {
                 }
             }
 
+            if let draftComment {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(draftComment.title)
+                        .font(.body)
+                    Text(draftComment.statusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField("Draft Comment", text: $loader.draftCommentBody, axis: .vertical)
+                        .font(.caption)
+                        .lineLimit(6...12)
+                    if let failureMessage = draftComment.failureMessage {
+                        Text(failureMessage)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                    HStack {
+                        Button {
+                            loader.draftCommentDecisionToConfirm = .approve
+                        } label: {
+                            Label("Post", systemImage: "paperplane.fill")
+                        }
+                        .disabled(
+                            !draftComment.requiresApproval
+                                || loader.draftCommentBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                || loader.isSubmittingDraftCommentDecision
+                        )
+
+                        Button(role: .destructive) {
+                            loader.draftCommentDecisionToConfirm = .reject
+                        } label: {
+                            Label("Reject", systemImage: "xmark.circle.fill")
+                        }
+                        .disabled(!draftComment.requiresApproval || loader.isSubmittingDraftCommentDecision)
+                    }
+                }
+                .confirmationDialog(
+                    "Decide Draft Comment?",
+                    isPresented: draftCommentDecisionConfirmationBinding,
+                    titleVisibility: .visible
+                ) {
+                    if let decision = loader.draftCommentDecisionToConfirm {
+                        Button(decision == .approve ? "Post to GitHub" : "Reject", role: decision == .reject ? .destructive : nil) {
+                            Task {
+                                await loader.decideDraftComment(decision, draftID: draftComment.id)
+                            }
+                        }
+                    }
+                    Button("Cancel", role: .cancel) {
+                        loader.draftCommentDecisionToConfirm = nil
+                    }
+                }
+            }
+
             ForEach(actions) { action in
                 if action.id == "reply", action.isAvailable {
                     VStack(alignment: .leading, spacing: 8) {
@@ -423,6 +552,20 @@ struct StructuredActionsSection: View {
                             Button("Cancel", role: .cancel) {}
                         }
                     }
+                } else if action.id == "draft-comment" {
+                    if draftComment == nil {
+                        VStack(alignment: .leading, spacing: 8) {
+                            actionHeader(action)
+                            Button {
+                                Task {
+                                    await loader.prepareDraft()
+                                }
+                            } label: {
+                                Label("Prepare Draft", systemImage: "doc.text.magnifyingglass")
+                            }
+                            .disabled(!action.isAvailable || loader.isPreparingDraftComment)
+                        }
+                    }
                 } else if pendingApprovalRequest == nil || (action.id != "approve" && action.id != "deny") {
                     HStack {
                         actionHeader(action)
@@ -443,6 +586,16 @@ struct StructuredActionsSection: View {
         } set: { isPresented in
             if !isPresented {
                 loader.approvalDecisionToConfirm = nil
+            }
+        }
+    }
+
+    private var draftCommentDecisionConfirmationBinding: Binding<Bool> {
+        Binding {
+            loader.draftCommentDecisionToConfirm != nil
+        } set: { isPresented in
+            if !isPresented {
+                loader.draftCommentDecisionToConfirm = nil
             }
         }
     }

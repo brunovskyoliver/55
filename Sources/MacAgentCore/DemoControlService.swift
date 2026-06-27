@@ -29,13 +29,23 @@ public protocol ApprovalDecisionSubmitting: Sendable {
     func submitApprovalDecision(_ request: SubmitApprovalDecisionRequest) throws -> SubmitApprovalDecisionResponse
 }
 
-public final class DemoControlService: ControlAPIProviding, PlanningArtifactAttaching, WrappedSessionStarting, PendingInputSignalAccepting, PendingInputReplySubmitting, ApprovalRequestSignalAccepting, ApprovalDecisionSubmitting, @unchecked Sendable {
+public protocol DraftCommentPreparing: Sendable {
+    func prepareDraftComment(_ request: PrepareDraftCommentRequest) throws -> PrepareDraftCommentResponse
+}
+
+public protocol DraftCommentDecisionSubmitting: Sendable {
+    func submitDraftCommentDecision(_ request: SubmitDraftCommentDecisionRequest) throws -> SubmitDraftCommentDecisionResponse
+}
+
+public final class DemoControlService: ControlAPIProviding, PlanningArtifactAttaching, WrappedSessionStarting, PendingInputSignalAccepting, PendingInputReplySubmitting, ApprovalRequestSignalAccepting, ApprovalDecisionSubmitting, DraftCommentPreparing, DraftCommentDecisionSubmitting, @unchecked Sendable {
     private let resolver: any PlanningArtifactResolving
     private let baselineCapturer: any WorktreeBaselineCapturing
     private let tmuxLauncher: any TmuxLaunching
     private let inputSender: any WrappedSessionInputSending
     private let approvalDecisionSender: any ApprovalDecisionSending
+    private let commentPoster: any GitHubCommentPosting
     private let sessionIDGenerator: @Sendable () -> String
+    private let draftIDGenerator: @Sendable () -> String
     private let eventIDGenerator: @Sendable () -> String
     private let now: @Sendable () -> Date
     private let state: LockedDemoControlServiceState
@@ -47,12 +57,14 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
         tmuxLauncher: any TmuxLaunching = TmuxClaudeLauncher(),
         inputSender: any WrappedSessionInputSending = TmuxWrappedSessionInputSender(),
         approvalDecisionSender: any ApprovalDecisionSending = TmuxApprovalDecisionSender(),
+        commentPoster: any GitHubCommentPosting = GitHubCLICommentPoster(),
         fileReviewBuilder: any FileReviewBuilding = GitFileReviewBuilder(),
         sessionStore: any SessionEventStoring = SQLiteSessionStore(
             databaseURL: FileManager.default.temporaryDirectory
                 .appending(path: "AgentSessionControl-\(UUID().uuidString).sqlite")
         ),
         sessionIDGenerator: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
+        draftIDGenerator: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
         eventIDGenerator: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
         now: @escaping @Sendable () -> Date = Date.init
     ) {
@@ -61,7 +73,9 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
         self.tmuxLauncher = tmuxLauncher
         self.inputSender = inputSender
         self.approvalDecisionSender = approvalDecisionSender
+        self.commentPoster = commentPoster
         self.sessionIDGenerator = sessionIDGenerator
+        self.draftIDGenerator = draftIDGenerator
         self.eventIDGenerator = eventIDGenerator
         self.now = now
         self.state = LockedDemoControlServiceState(
@@ -69,6 +83,114 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
             sessionStore: sessionStore,
             fileReviewBuilder: fileReviewBuilder
         )
+    }
+
+    public func prepareDraftComment(_ request: PrepareDraftCommentRequest = PrepareDraftCommentRequest()) throws -> PrepareDraftCommentResponse {
+        try state.prepareDraftComment(
+            draftID: draftIDGenerator(),
+            preparedAt: now(),
+            eventID: eventIDGenerator()
+        )
+    }
+
+    public func submitDraftCommentDecision(_ request: SubmitDraftCommentDecisionRequest) throws -> SubmitDraftCommentDecisionResponse {
+        let context = try state.prepareDraftCommentDecision(request)
+        let attemptTitle = context.decision == .approve
+            ? "Draft Comment approved"
+            : "Draft Comment rejected"
+        try state.append(
+            event(
+                planningArtifact: context.planningArtifact,
+                agentSessionID: context.activeSession?.session.id,
+                eventType: .structuredActionAttempt,
+                title: attemptTitle,
+                detail: context.draft.title,
+                metadata: [
+                    "action": "draft_comment_decision",
+                    "draftCommentID": context.draft.id,
+                    "decision": context.decision.rawValue
+                ]
+            )
+        )
+
+        guard context.decision == .approve else {
+            let foregroundState = try state.completeDraftCommentRejection(
+                draftID: context.draft.id,
+                resultEvent: event(
+                    planningArtifact: context.planningArtifact,
+                    agentSessionID: context.activeSession?.session.id,
+                    eventType: .structuredActionResult,
+                    title: "Draft Comment rejected",
+                    detail: "The Draft Comment was rejected by the Owner Device and was not posted.",
+                    metadata: [
+                        "action": "draft_comment_decision",
+                        "draftCommentID": context.draft.id,
+                        "decision": DraftCommentDecision.reject.rawValue,
+                        "result": "rejected"
+                    ]
+                )
+            )
+            return SubmitDraftCommentDecisionResponse(foregroundState: foregroundState)
+        }
+
+        do {
+            let result = try commentPoster.postGeneralComment(context.commentBody, to: context.planningArtifact)
+            let foregroundState = try state.completeDraftCommentPost(
+                draftID: context.draft.id,
+                postedBody: context.commentBody,
+                resultEvent: event(
+                    planningArtifact: context.planningArtifact,
+                    agentSessionID: context.activeSession?.session.id,
+                    eventType: .githubAction,
+                    title: "GitHub comment posted",
+                    detail: result.summary,
+                    metadata: [
+                        "action": "github_comment_post",
+                        "draftCommentID": context.draft.id,
+                        "result": "success",
+                        "url": result.url?.absoluteString ?? ""
+                    ]
+                )
+            )
+            return SubmitDraftCommentDecisionResponse(foregroundState: foregroundState)
+        } catch let error as DraftCommentError {
+            try? state.completeDraftCommentFailure(
+                draftID: context.draft.id,
+                message: error.userMessage,
+                resultEvent: event(
+                    planningArtifact: context.planningArtifact,
+                    agentSessionID: context.activeSession?.session.id,
+                    eventType: .githubAction,
+                    title: "GitHub comment post failed",
+                    detail: error.userMessage,
+                    metadata: [
+                        "action": "github_comment_post",
+                        "draftCommentID": context.draft.id,
+                        "result": "failure"
+                    ]
+                )
+            )
+            throw error
+        } catch {
+            let draftError = DraftCommentError.githubPostFailed(String(describing: error))
+            try? state.completeDraftCommentFailure(
+                draftID: context.draft.id,
+                message: draftError.userMessage,
+                resultEvent: event(
+                    planningArtifact: context.planningArtifact,
+                    agentSessionID: context.activeSession?.session.id,
+                    eventType: .githubAction,
+                    title: "GitHub comment post failed",
+                    detail: draftError.userMessage,
+                    metadata: [
+                        "action": "github_comment_post",
+                        "draftCommentID": context.draft.id,
+                        "result": "failure"
+                    ]
+                )
+            )
+            throw draftError
+        }
     }
 
     public func acceptPendingInputSignal(_ signal: PendingInputSignal) throws -> ControlForegroundResponse {
@@ -380,7 +502,11 @@ public extension DemoControlService {
             reply: StructuredActionState(isAvailable: false, reason: "No Pending Input"),
             approve: StructuredActionState(isAvailable: false, reason: "No approval request"),
             deny: StructuredActionState(isAvailable: false, reason: "No approval request"),
-            draftComment: StructuredActionState(isAvailable: false, reason: "Draft Comments arrive in a later slice"),
+            draftComment: StructuredActionState(
+                isAvailable: true,
+                reason: "Prepare a GitHub Draft Comment",
+                requiresConfirmation: true
+            ),
             guardedStop: StructuredActionState(isAvailable: false, reason: "No Agent Session")
         ),
         fileReview: FileReviewState(
@@ -405,7 +531,9 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
     private var activeSession: AttachedSession?
     private var pendingInput: PendingInputState = .unavailable
     private var pendingApprovalRequest: ApprovalRequestState?
+    private var pendingDraftComment: DraftCommentState = .unavailable
     private var decidedApprovalRequestIDs: Set<String> = []
+    private var decidedDraftCommentIDs: Set<String> = []
 
     init(
         configuredRepositoryURL: URL,
@@ -435,7 +563,8 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
                 configuredRepository: configuredRepository,
                 activeSession: activeSession,
                 pendingInput: pendingInput,
-                pendingApprovalRequest: pendingApprovalRequest
+                pendingApprovalRequest: pendingApprovalRequest,
+                draftComment: pendingDraftComment
             )
         }
     }
@@ -444,12 +573,14 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
         try lock.withLock {
             try sessionStore.append(event)
             activeAttachment = attachment
+            pendingDraftComment = .unavailable
             return try foregroundState(
                 for: attachment,
                 configuredRepository: configuredRepository,
                 activeSession: activeSession,
                 pendingInput: pendingInput,
-                pendingApprovalRequest: pendingApprovalRequest
+                pendingApprovalRequest: pendingApprovalRequest,
+                draftComment: pendingDraftComment
             )
         }
     }
@@ -493,6 +624,7 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
             activeAttachment = planningArtifact
             pendingInput = .unavailable
             pendingApprovalRequest = nil
+            pendingDraftComment = .unavailable
             let session = AgentSession(
                 id: sessionID,
                 displayName: "Claude Code Wrapped Session",
@@ -512,7 +644,8 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
                 configuredRepository: configuredRepository,
                 activeSession: attachedSession,
                 pendingInput: pendingInput,
-                pendingApprovalRequest: pendingApprovalRequest
+                pendingApprovalRequest: pendingApprovalRequest,
+                draftComment: pendingDraftComment
             )
             return StartWrappedSessionResponse(attachedSession: attachedSession, foregroundState: foregroundState)
         }
@@ -553,7 +686,8 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
                 configuredRepository: configuredRepository,
                 activeSession: self.activeSession,
                 pendingInput: pendingInput,
-                pendingApprovalRequest: pendingApprovalRequest
+                pendingApprovalRequest: pendingApprovalRequest,
+                draftComment: pendingDraftComment
             )
         }
     }
@@ -600,7 +734,8 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
                 configuredRepository: configuredRepository,
                 activeSession: self.activeSession,
                 pendingInput: pendingInput,
-                pendingApprovalRequest: pendingApprovalRequest
+                pendingApprovalRequest: pendingApprovalRequest,
+                draftComment: pendingDraftComment
             )
         }
     }
@@ -675,7 +810,8 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
                 configuredRepository: configuredRepository,
                 activeSession: self.activeSession,
                 pendingInput: pendingInput,
-                pendingApprovalRequest: pendingApprovalRequest
+                pendingApprovalRequest: pendingApprovalRequest,
+                draftComment: pendingDraftComment
             )
         }
     }
@@ -698,8 +834,170 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
                 configuredRepository: configuredRepository,
                 activeSession: self.activeSession,
                 pendingInput: pendingInput,
-                pendingApprovalRequest: pendingApprovalRequest
+                pendingApprovalRequest: pendingApprovalRequest,
+                draftComment: pendingDraftComment
             )
+        }
+    }
+
+    func prepareDraftComment(
+        draftID: String,
+        preparedAt: Date,
+        eventID: String
+    ) throws -> PrepareDraftCommentResponse {
+        try lock.withLock {
+            guard let activeAttachment else {
+                throw DraftCommentError.noActivePlanningArtifact
+            }
+
+            let fileReview = fileReviewBuilder.buildFileReview(
+                repositoryURL: configuredRepositoryURL,
+                activeSession: activeSession
+            )
+            let auditEvents = try sessionStore.query(
+                SessionEventQuery(planningArtifactID: activeAttachment.id, limit: 20)
+            )
+            let draft = ObservableDraftCommentBuilder().build(
+                draftID: draftID,
+                artifact: activeAttachment,
+                activeSession: activeSession,
+                pendingInput: pendingInput,
+                pendingApprovalRequest: pendingApprovalRequest,
+                fileReview: fileReview,
+                auditEvents: auditEvents,
+                preparedAt: preparedAt
+            )
+            pendingDraftComment = draft
+            try sessionStore.append(
+                SessionEventLogEntry(
+                    id: eventID,
+                    planningArtifactID: activeAttachment.id,
+                    agentSessionID: activeSession?.session.id,
+                    eventType: .structuredActionAttempt,
+                    title: "Draft Comment prepared",
+                    detail: draft.title,
+                    occurredAt: preparedAt,
+                    metadata: [
+                        "action": "draft_comment_prepare",
+                        "draftCommentID": draft.id
+                    ]
+                )
+            )
+
+            let foregroundState = try foregroundState(
+                for: activeAttachment,
+                configuredRepository: configuredRepository,
+                activeSession: activeSession,
+                pendingInput: pendingInput,
+                pendingApprovalRequest: pendingApprovalRequest,
+                draftComment: pendingDraftComment
+            )
+            return PrepareDraftCommentResponse(draftComment: draft, foregroundState: foregroundState)
+        }
+    }
+
+    func prepareDraftCommentDecision(_ request: SubmitDraftCommentDecisionRequest) throws -> DraftCommentDecisionContext {
+        try lock.withLock {
+            guard let activeAttachment else {
+                throw DraftCommentError.noActivePlanningArtifact
+            }
+
+            if decidedDraftCommentIDs.contains(request.draftID) {
+                throw DraftCommentError.duplicateDecision
+            }
+
+            guard pendingDraftComment.status == .prepared else {
+                throw DraftCommentError.noPreparedDraftComment
+            }
+
+            guard pendingDraftComment.id == request.draftID else {
+                throw DraftCommentError.staleDraftComment
+            }
+
+            let commentBody = (request.approvedBody ?? pendingDraftComment.body)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if request.decision == .approve, commentBody.isEmpty {
+                throw DraftCommentError.emptyCommentBody
+            }
+
+            return DraftCommentDecisionContext(
+                planningArtifact: activeAttachment,
+                activeSession: activeSession,
+                draft: pendingDraftComment,
+                decision: request.decision,
+                commentBody: commentBody
+            )
+        }
+    }
+
+    func completeDraftCommentRejection(
+        draftID: String,
+        resultEvent: SessionEventLogEntry
+    ) throws -> ControlForegroundResponse {
+        try lock.withLock {
+            guard let activeAttachment else {
+                throw DraftCommentError.noActivePlanningArtifact
+            }
+
+            try sessionStore.append(resultEvent)
+            decidedDraftCommentIDs.insert(draftID)
+            if pendingDraftComment.id == draftID {
+                pendingDraftComment.status = .rejected
+                pendingDraftComment.requiresApproval = false
+            }
+
+            return try foregroundState(
+                for: activeAttachment,
+                configuredRepository: configuredRepository,
+                activeSession: activeSession,
+                pendingInput: pendingInput,
+                pendingApprovalRequest: pendingApprovalRequest,
+                draftComment: pendingDraftComment
+            )
+        }
+    }
+
+    func completeDraftCommentPost(
+        draftID: String,
+        postedBody: String,
+        resultEvent: SessionEventLogEntry
+    ) throws -> ControlForegroundResponse {
+        try lock.withLock {
+            guard let activeAttachment else {
+                throw DraftCommentError.noActivePlanningArtifact
+            }
+
+            try sessionStore.append(resultEvent)
+            decidedDraftCommentIDs.insert(draftID)
+            if pendingDraftComment.id == draftID {
+                pendingDraftComment.status = .posted
+                pendingDraftComment.body = postedBody
+                pendingDraftComment.requiresApproval = false
+            }
+
+            return try foregroundState(
+                for: activeAttachment,
+                configuredRepository: configuredRepository,
+                activeSession: activeSession,
+                pendingInput: pendingInput,
+                pendingApprovalRequest: pendingApprovalRequest,
+                draftComment: pendingDraftComment
+            )
+        }
+    }
+
+    func completeDraftCommentFailure(
+        draftID: String,
+        message: String,
+        resultEvent: SessionEventLogEntry
+    ) throws {
+        try lock.withLock {
+            try sessionStore.append(resultEvent)
+            if pendingDraftComment.id == draftID {
+                pendingDraftComment.status = .failed
+                pendingDraftComment.failureMessage = message
+                pendingDraftComment.requiresApproval = true
+            }
         }
     }
 
@@ -708,7 +1006,8 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
         configuredRepository: ConfiguredRepository,
         activeSession: AttachedSession?,
         pendingInput: PendingInputState,
-        pendingApprovalRequest: ApprovalRequestState?
+        pendingApprovalRequest: ApprovalRequestState?,
+        draftComment: DraftCommentState
     ) throws -> ControlForegroundResponse {
         let attachedSessions = activeSession.map { [$0] } ?? []
         let hasActiveSession = activeSession?.session.state != nil && activeSession?.session.state != .stopped
@@ -723,15 +1022,17 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
             attachedSessions: attachedSessions,
             pendingInput: pendingInput,
             pendingApprovalRequest: pendingApprovalRequest,
+            draftComment: draftComment,
             structuredActionAvailability: StructuredActionAvailability(
                 reply: replyActionState(for: pendingInput),
                 approve: approvalActionState(for: pendingApprovalRequest, decision: .approve),
                 deny: approvalActionState(for: pendingApprovalRequest, decision: .deny),
                 draftComment: StructuredActionState(
-                    isAvailable: artifact.kind == .issue,
-                    reason: artifact.kind == .issue
-                        ? "Issue planning comment can be prepared in a later slice"
-                        : "PR review comments arrive in a later slice"
+                    isAvailable: true,
+                    reason: draftComment.status == .prepared
+                        ? "Draft Comment is ready for Owner Device approval"
+                        : "Prepare a GitHub Draft Comment",
+                    requiresConfirmation: true
                 ),
                 guardedStop: StructuredActionState(
                     isAvailable: hasActiveSession,
@@ -879,6 +1180,14 @@ private struct ApprovalDecisionContext: Sendable {
     var activeSession: AttachedSession
     var approvalRequest: ApprovalRequestState
     var decision: ApprovalRequestDecision
+}
+
+private struct DraftCommentDecisionContext: Sendable {
+    var planningArtifact: PlanningArtifact
+    var activeSession: AttachedSession?
+    var draft: DraftCommentState
+    var decision: DraftCommentDecision
+    var commentBody: String
 }
 
 private extension AttachedSession {

@@ -31,6 +31,8 @@ public struct LocalControlAPIResponder: Sendable {
     private let sessionStarter: (any WrappedSessionStarting)?
     private let pendingInputReplySubmitter: (any PendingInputReplySubmitting)?
     private let approvalDecisionSubmitter: (any ApprovalDecisionSubmitting)?
+    private let draftCommentPreparer: (any DraftCommentPreparing)?
+    private let draftCommentDecisionSubmitter: (any DraftCommentDecisionSubmitting)?
     private let pairingService: MacPairingService?
     private let securityPolicy: ControlAPISecurityPolicy
     private let encoder: JSONEncoder
@@ -46,6 +48,8 @@ public struct LocalControlAPIResponder: Sendable {
         self.sessionStarter = provider as? any WrappedSessionStarting
         self.pendingInputReplySubmitter = provider as? any PendingInputReplySubmitting
         self.approvalDecisionSubmitter = provider as? any ApprovalDecisionSubmitting
+        self.draftCommentPreparer = provider as? any DraftCommentPreparing
+        self.draftCommentDecisionSubmitter = provider as? any DraftCommentDecisionSubmitting
         self.pairingService = pairingService
         self.securityPolicy = securityPolicy
         self.encoder = JSONEncoder()
@@ -103,6 +107,24 @@ public struct LocalControlAPIResponder: Sendable {
             }
 
             return approvalDecisionResponse(body: request.body)
+        }
+
+        if request.method == "POST", request.path == LocalControlAPIServer.draftCommentPreparePath {
+            let authorization = securityPolicy.authorize(request: request, channelSecurity: channelSecurity)
+            guard case .authorized = authorization else {
+                return authorizationFailureResponse(authorization)
+            }
+
+            return draftCommentPrepareResponse(body: request.body)
+        }
+
+        if request.method == "POST", request.path == LocalControlAPIServer.draftCommentDecisionPath {
+            let authorization = securityPolicy.authorize(request: request, channelSecurity: channelSecurity)
+            guard case .authorized = authorization else {
+                return authorizationFailureResponse(authorization)
+            }
+
+            return draftCommentDecisionResponse(body: request.body)
         }
 
         if request.method == "POST", request.path == LocalControlAPIServer.pairingCompletionPath {
@@ -188,6 +210,78 @@ public struct LocalControlAPIResponder: Sendable {
                 statusCode: 400,
                 errorCode: "approval_decision_failed",
                 message: "The approval decision request could not be completed."
+            )
+        }
+    }
+
+    private func draftCommentPrepareResponse(body: Data) -> LocalControlAPIHTTPResponse {
+        guard let draftCommentPreparer else {
+            return jsonErrorResponse(
+                status: "503 Service Unavailable",
+                statusCode: 503,
+                errorCode: "draft_comment_unavailable",
+                message: "This Mac Agent cannot prepare Draft Comments."
+            )
+        }
+
+        do {
+            let request = body.isEmpty
+                ? PrepareDraftCommentRequest()
+                : try decoder.decode(PrepareDraftCommentRequest.self, from: body)
+            return LocalControlAPIHTTPResponse(
+                status: "200 OK",
+                statusCode: 200,
+                contentType: "application/json",
+                body: try encoder.encode(draftCommentPreparer.prepareDraftComment(request))
+            )
+        } catch let error as DraftCommentError {
+            return jsonErrorResponse(
+                status: draftCommentFailureStatus(for: error),
+                statusCode: draftCommentFailureStatusCode(for: error),
+                errorCode: error.apiErrorCode,
+                message: error.userMessage
+            )
+        } catch {
+            return jsonErrorResponse(
+                status: "400 Bad Request",
+                statusCode: 400,
+                errorCode: "draft_comment_prepare_failed",
+                message: "The Draft Comment could not be prepared."
+            )
+        }
+    }
+
+    private func draftCommentDecisionResponse(body: Data) -> LocalControlAPIHTTPResponse {
+        guard let draftCommentDecisionSubmitter else {
+            return jsonErrorResponse(
+                status: "503 Service Unavailable",
+                statusCode: 503,
+                errorCode: "draft_comment_unavailable",
+                message: "This Mac Agent cannot decide Draft Comments."
+            )
+        }
+
+        do {
+            let request = try decoder.decode(SubmitDraftCommentDecisionRequest.self, from: body)
+            return LocalControlAPIHTTPResponse(
+                status: "200 OK",
+                statusCode: 200,
+                contentType: "application/json",
+                body: try encoder.encode(draftCommentDecisionSubmitter.submitDraftCommentDecision(request))
+            )
+        } catch let error as DraftCommentError {
+            return jsonErrorResponse(
+                status: draftCommentFailureStatus(for: error),
+                statusCode: draftCommentFailureStatusCode(for: error),
+                errorCode: error.apiErrorCode,
+                message: error.userMessage
+            )
+        } catch {
+            return jsonErrorResponse(
+                status: "400 Bad Request",
+                statusCode: 400,
+                errorCode: "draft_comment_decision_failed",
+                message: "The Draft Comment decision could not be completed."
             )
         }
     }
@@ -463,6 +557,28 @@ public struct LocalControlAPIResponder: Sendable {
             return 502
         }
     }
+
+    private func draftCommentFailureStatus(for error: DraftCommentError) -> String {
+        switch error {
+        case .noActivePlanningArtifact, .noPreparedDraftComment, .staleDraftComment, .duplicateDecision:
+            return "409 Conflict"
+        case .emptyCommentBody:
+            return "400 Bad Request"
+        case .githubPostFailed:
+            return "502 Bad Gateway"
+        }
+    }
+
+    private func draftCommentFailureStatusCode(for error: DraftCommentError) -> Int {
+        switch error {
+        case .noActivePlanningArtifact, .noPreparedDraftComment, .staleDraftComment, .duplicateDecision:
+            return 409
+        case .emptyCommentBody:
+            return 400
+        case .githubPostFailed:
+            return 502
+        }
+    }
 }
 
 public final class LocalControlAPIServer: @unchecked Sendable {
@@ -472,6 +588,8 @@ public final class LocalControlAPIServer: @unchecked Sendable {
     public static let wrappedSessionStartPath = "/v1/agent-session/start"
     public static let pendingInputReplyPath = "/v1/pending-input/reply"
     public static let approvalDecisionPath = "/v1/approval-request/decision"
+    public static let draftCommentPreparePath = "/v1/draft-comment/prepare"
+    public static let draftCommentDecisionPath = "/v1/draft-comment/decision"
 
     private let responder: LocalControlAPIResponder
     private let requestedPort: UInt16

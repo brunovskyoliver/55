@@ -5,6 +5,7 @@ public enum SessionEventType: String, Codable, Equatable, CaseIterable, Sendable
     case sessionLifecycle
     case structuredActionAttempt
     case structuredActionResult
+    case githubAction
 }
 
 public struct SessionEventLogEntry: Codable, Equatable, Identifiable, Sendable {

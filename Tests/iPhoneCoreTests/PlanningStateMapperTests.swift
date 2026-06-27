@@ -280,6 +280,53 @@ final class PlanningStateMapperTests: XCTestCase {
         XCTAssertEqual(file.selectedHunks.first?.header, "@@ -1 +1 @@")
     }
 
+    func testMapperCarriesPreparedDraftComment() throws {
+        let response = ControlForegroundResponse(
+            planningArtifacts: [
+                PlanningArtifact(
+                    id: "issue-10",
+                    kind: .issue,
+                    number: 10,
+                    title: "Prepare Draft Comments",
+                    url: URL(string: "https://github.com/brunovskyoliver/55/issues/10")!,
+                    state: "open"
+                )
+            ],
+            activePlanningArtifactID: "issue-10",
+            attachedSessions: [],
+            draftComment: DraftCommentState(
+                id: "draft-10",
+                status: .prepared,
+                title: "Draft GitHub comment for Issue #10",
+                body: "## Observable Summary",
+                preparedAt: Date(timeIntervalSince1970: 60),
+                requiresApproval: true
+            ),
+            structuredActionAvailability: StructuredActionAvailability(
+                reply: StructuredActionState(isAvailable: false, reason: "No Pending Input"),
+                approve: StructuredActionState(isAvailable: false, reason: "No approval request"),
+                deny: StructuredActionState(isAvailable: false, reason: "No approval request"),
+                draftComment: StructuredActionState(
+                    isAvailable: true,
+                    reason: "Draft Comment is ready for Owner Device approval",
+                    requiresConfirmation: true
+                ),
+                guardedStop: StructuredActionState(isAvailable: false, reason: "No session")
+            ),
+            fileReview: FileReviewPlaceholder(status: "placeholder", summary: "Unavailable", changedFileCount: 0),
+            auditTimeline: AuditTimelinePlaceholder(summary: "Audit Timeline", entries: [])
+        )
+
+        let state = try PlanningStateMapper().map(response)
+
+        XCTAssertEqual(state.draftComment?.id, "draft-10")
+        XCTAssertEqual(state.draftComment?.statusText, "Prepared")
+        XCTAssertEqual(state.draftComment?.body, "## Observable Summary")
+        XCTAssertTrue(state.draftComment?.requiresApproval == true)
+        let action = try XCTUnwrap(state.structuredActions.first { $0.id == "draft-comment" })
+        XCTAssertTrue(action.requiresConfirmation)
+    }
+
     func testMapperRejectsMissingActivePlanningArtifact() {
         let response = ControlForegroundResponse(
             planningArtifacts: [],

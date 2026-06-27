@@ -7,6 +7,7 @@ public struct ControlForegroundResponse: Codable, Equatable, Sendable {
     public var attachedSessions: [AttachedSession]
     public var pendingInput: PendingInputState
     public var pendingApprovalRequest: ApprovalRequestState?
+    public var draftComment: DraftCommentState
     public var structuredActionAvailability: StructuredActionAvailability
     public var fileReview: FileReviewState
     public var auditTimeline: AuditTimelinePlaceholder
@@ -18,6 +19,7 @@ public struct ControlForegroundResponse: Codable, Equatable, Sendable {
         attachedSessions: [AttachedSession],
         pendingInput: PendingInputState = .unavailable,
         pendingApprovalRequest: ApprovalRequestState? = nil,
+        draftComment: DraftCommentState = .unavailable,
         structuredActionAvailability: StructuredActionAvailability,
         fileReview: FileReviewState,
         auditTimeline: AuditTimelinePlaceholder
@@ -28,6 +30,7 @@ public struct ControlForegroundResponse: Codable, Equatable, Sendable {
         self.attachedSessions = attachedSessions
         self.pendingInput = pendingInput
         self.pendingApprovalRequest = pendingApprovalRequest
+        self.draftComment = draftComment
         self.structuredActionAvailability = structuredActionAvailability
         self.fileReview = fileReview
         self.auditTimeline = auditTimeline
