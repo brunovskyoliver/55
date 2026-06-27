@@ -144,3 +144,12 @@ GitHub remains the system of record for Planning Artifacts. GitHub Actions execu
 - The main experimental unknown is Claude Code signal quality: hooks should be validated against real approval, clarification, completion, and failure flows.
 - Another key unknown is how reliably tmux output heuristics identify Pending Input without false positives.
 - Battery risk is managed by Foreground Sync in the MVP and a push-driven design later.
+
+## LAN MVP Validation Notes
+
+- Local validation is documented in `docs/demo/full-lan-mvp.md`.
+- The automated end-to-end check uses the real Control API responder, pairing service, Session Store, Mac service layer, and iPhone Planning-Centered mapper.
+- The automated check uses fake Adapter seams for tmux launch, Pending Input, approval request, GitHub comment posting, and Guarded Stop so the workflow is deterministic without brittle real Claude Code automation.
+- The validated MVP Control Set remains limited to reply, approve, deny, Draft Comment approval, and Guarded Stop. Arbitrary terminal input, commit, push, merge, and pull request creation are not exposed by the iPhone surface or Control API.
+- Unpaired Control API access is rejected before foreground state or Structured Actions are served.
+- Remaining signal-quality work: validate real Claude Code hook coverage for approval, clarification, completion, and failure states; validate tmux heuristic false-positive rates before reducing confirmation friction.
