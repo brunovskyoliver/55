@@ -128,6 +128,7 @@ private func approvalService(
         configuredRepositoryURL: URL(fileURLWithPath: "/repo"),
         baselineCapturer: ApprovalBaselineCapturer(),
         tmuxLauncher: ApprovalTmuxLauncher(),
+        transcriptCapturer: DisabledWrappedSessionTranscriptCapturer(),
         inputSender: NoopInputSender(),
         approvalDecisionSender: approvalDecisionSender,
         sessionStore: sessionStore,

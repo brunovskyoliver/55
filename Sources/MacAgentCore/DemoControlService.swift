@@ -45,6 +45,7 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
     private let resolver: any PlanningArtifactResolving
     private let baselineCapturer: any WorktreeBaselineCapturing
     private let tmuxLauncher: any TmuxLaunching
+    private let transcriptCapturer: (any WrappedSessionTranscriptCapturing)?
     private let sessionStopper: any WrappedSessionStopping
     private let inputSender: any WrappedSessionInputSending
     private let approvalDecisionSender: any ApprovalDecisionSending
@@ -60,6 +61,7 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
         configuredRepositoryURL: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
         baselineCapturer: any WorktreeBaselineCapturing = GitWorktreeBaselineCapturer(),
         tmuxLauncher: any TmuxLaunching = TmuxClaudeLauncher(),
+        transcriptCapturer: (any WrappedSessionTranscriptCapturing)? = nil,
         sessionStopper: any WrappedSessionStopping = TmuxWrappedSessionStopper(),
         inputSender: any WrappedSessionInputSending = TmuxWrappedSessionInputSender(),
         approvalDecisionSender: any ApprovalDecisionSending = TmuxApprovalDecisionSender(),
@@ -77,6 +79,15 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
         self.resolver = resolver
         self.baselineCapturer = baselineCapturer
         self.tmuxLauncher = tmuxLauncher
+        if let transcriptCapturer {
+            self.transcriptCapturer = transcriptCapturer
+        } else if let transcriptMetadataStore = sessionStore as? any TranscriptMetadataStoring {
+            self.transcriptCapturer = TmuxWrappedSessionTranscriptCapturer(
+                transcriptStore: LocalTranscriptFileStore.applicationSupportStore(metadataStore: transcriptMetadataStore)
+            )
+        } else {
+            self.transcriptCapturer = nil
+        }
         self.sessionStopper = sessionStopper
         self.inputSender = inputSender
         self.approvalDecisionSender = approvalDecisionSender
@@ -536,7 +547,7 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
             throw launchError
         }
 
-        return try state.storeLaunchedSession(
+        let launchResponse = try state.storeLaunchedSession(
             sessionID: sessionID,
             planningArtifact: launchContext.planningArtifact,
             baseline: baseline,
@@ -557,6 +568,62 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
                 detail: baseline.summary,
                 metadata: ["state": AgentSession.State.running.rawValue]
             )
+        )
+
+        guard let transcriptCapturer else {
+            return launchResponse
+        }
+
+        do {
+            if let record = try transcriptCapturer.captureTranscriptChunk(
+                for: launchResponse.attachedSession,
+                planningArtifact: launchContext.planningArtifact
+            ) {
+                try state.append(
+                    event(
+                        planningArtifact: launchContext.planningArtifact,
+                        agentSessionID: sessionID,
+                        eventType: .sessionLifecycle,
+                        title: "Transcript chunk captured",
+                        detail: "Appended \(record.byteCount) bytes to the local Transcript File.",
+                        metadata: [
+                            "transcriptCapture": "success",
+                            "transcriptFileID": record.id,
+                            "relativePath": record.relativePath,
+                            "byteOffsetStart": "\(record.byteOffsetStart)",
+                            "byteOffsetEnd": "\(record.byteOffsetEnd)",
+                            "byteCount": "\(record.byteCount)"
+                        ]
+                    )
+                )
+            }
+        } catch let error as TranscriptFileError {
+            try? state.append(
+                event(
+                    planningArtifact: launchContext.planningArtifact,
+                    agentSessionID: sessionID,
+                    eventType: .sessionLifecycle,
+                    title: "Transcript capture failed",
+                    detail: error.userMessage,
+                    metadata: ["transcriptCapture": "failure"]
+                )
+            )
+        } catch {
+            try? state.append(
+                event(
+                    planningArtifact: launchContext.planningArtifact,
+                    agentSessionID: sessionID,
+                    eventType: .sessionLifecycle,
+                    title: "Transcript capture failed",
+                    detail: String(describing: error),
+                    metadata: ["transcriptCapture": "failure"]
+                )
+            )
+        }
+
+        return StartWrappedSessionResponse(
+            attachedSession: launchResponse.attachedSession,
+            foregroundState: try state.foregroundState()
         )
     }
 

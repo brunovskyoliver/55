@@ -74,6 +74,7 @@ final class WrappedSessionLaunchTests: XCTestCase {
             configuredRepositoryURL: URL(fileURLWithPath: "/repo"),
             baselineCapturer: FakeBaselineCapturer(baseline: .clean, events: RecordedLaunchEvents()),
             tmuxLauncher: FakeTmuxLauncher(),
+            transcriptCapturer: DisabledWrappedSessionTranscriptCapturer(),
             fileReviewBuilder: BaselineEchoFileReviewBuilder(),
             sessionIDGenerator: { "session-2" }
         )
@@ -188,6 +189,7 @@ private func launchableService(
         configuredRepositoryURL: URL(fileURLWithPath: "/repo"),
         baselineCapturer: FakeBaselineCapturer(baseline: baseline, events: events),
         tmuxLauncher: tmuxLauncher,
+        transcriptCapturer: DisabledWrappedSessionTranscriptCapturer(),
         fileReviewBuilder: BaselineEchoFileReviewBuilder(),
         sessionStore: sessionStore,
         sessionIDGenerator: { "session-5" }

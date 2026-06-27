@@ -127,6 +127,7 @@ private func pendingInputService(
         configuredRepositoryURL: URL(fileURLWithPath: "/repo"),
         baselineCapturer: PendingInputBaselineCapturer(),
         tmuxLauncher: PendingInputTmuxLauncher(),
+        transcriptCapturer: DisabledWrappedSessionTranscriptCapturer(),
         inputSender: inputSender,
         sessionStore: sessionStore,
         sessionIDGenerator: { "session-7" }

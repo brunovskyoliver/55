@@ -34,7 +34,7 @@ public enum SessionStoreError: Error, Equatable, Sendable {
     case invalidStoredEvent(String)
 }
 
-public final class SQLiteSessionStore: SessionEventStoring, @unchecked Sendable {
+public final class SQLiteSessionStore: SessionEventStoring, TranscriptMetadataStoring, @unchecked Sendable {
     private let databaseURL: URL
     private let lock = NSLock()
     private let metadataEncoder = JSONEncoder()
@@ -154,6 +154,93 @@ public final class SQLiteSessionStore: SessionEventStoring, @unchecked Sendable 
         }
     }
 
+    public func appendTranscriptMetadata(_ record: TranscriptFileRecord) throws {
+        try lock.withLock {
+            let database = try openDatabase()
+            defer { sqlite3_close(database) }
+
+            let sql = """
+            INSERT INTO transcript_files (
+                id,
+                planning_artifact_id,
+                agent_session_id,
+                relative_path,
+                byte_offset_start,
+                byte_offset_end,
+                byte_count,
+                captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """
+            let statement = try prepare(sql, database: database)
+            defer { sqlite3_finalize(statement) }
+
+            bindText(record.id, at: 1, in: statement)
+            bindText(record.planningArtifactID, at: 2, in: statement)
+            bindText(record.agentSessionID, at: 3, in: statement)
+            bindText(record.relativePath, at: 4, in: statement)
+            sqlite3_bind_int64(statement, 5, record.byteOffsetStart)
+            sqlite3_bind_int64(statement, 6, record.byteOffsetEnd)
+            sqlite3_bind_int64(statement, 7, record.byteCount)
+            sqlite3_bind_double(statement, 8, record.capturedAt.timeIntervalSince1970)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw SessionStoreError.executionFailed(lastErrorMessage(database))
+            }
+        }
+    }
+
+    public func queryTranscriptMetadata(_ query: TranscriptFileQuery = TranscriptFileQuery()) throws -> [TranscriptFileRecord] {
+        try lock.withLock {
+            let database = try openDatabase()
+            defer { sqlite3_close(database) }
+
+            var clauses: [String] = []
+            var textBindings: [String] = []
+
+            if let planningArtifactID = query.planningArtifactID {
+                clauses.append("planning_artifact_id = ?")
+                textBindings.append(planningArtifactID)
+            }
+
+            if let agentSessionID = query.agentSessionID {
+                clauses.append("agent_session_id = ?")
+                textBindings.append(agentSessionID)
+            }
+
+            var sql = """
+            SELECT id, planning_artifact_id, agent_session_id, relative_path, byte_offset_start, byte_offset_end, byte_count, captured_at
+            FROM transcript_files
+            """
+            if !clauses.isEmpty {
+                sql += " WHERE \(clauses.joined(separator: " AND "))"
+            }
+            sql += " ORDER BY captured_at ASC, sequence ASC"
+            if let limit = query.limit {
+                sql += " LIMIT \(max(0, limit))"
+            }
+
+            let statement = try prepare(sql, database: database)
+            defer { sqlite3_finalize(statement) }
+
+            for (index, value) in textBindings.enumerated() {
+                bindText(value, at: Int32(index + 1), in: statement)
+            }
+
+            var records: [TranscriptFileRecord] = []
+            while true {
+                let stepResult = sqlite3_step(statement)
+                if stepResult == SQLITE_DONE {
+                    break
+                }
+                guard stepResult == SQLITE_ROW else {
+                    throw SessionStoreError.executionFailed(lastErrorMessage(database))
+                }
+                records.append(try transcriptRecord(from: statement))
+            }
+            return records
+        }
+    }
+
     private func openDatabase() throws -> OpaquePointer? {
         if databaseURL.path != ":memory:" {
             try FileManager.default.createDirectory(
@@ -199,6 +286,19 @@ public final class SQLiteSessionStore: SessionEventStoring, @unchecked Sendable 
             ON session_events(agent_session_id, occurred_at, sequence);
         CREATE INDEX IF NOT EXISTS idx_session_events_type_time
             ON session_events(event_type, occurred_at, sequence);
+        CREATE TABLE IF NOT EXISTS transcript_files (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            id TEXT NOT NULL UNIQUE,
+            planning_artifact_id TEXT NOT NULL,
+            agent_session_id TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            byte_offset_start INTEGER NOT NULL,
+            byte_offset_end INTEGER NOT NULL,
+            byte_count INTEGER NOT NULL,
+            captured_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_transcript_files_session_time
+            ON transcript_files(planning_artifact_id, agent_session_id, captured_at, sequence);
         """
         guard sqlite3_exec(database, schema, nil, nil, nil) == SQLITE_OK else {
             throw SessionStoreError.schemaFailed(lastErrorMessage(database))
@@ -243,6 +343,19 @@ public final class SQLiteSessionStore: SessionEventStoring, @unchecked Sendable 
             detail: try stringColumn(5, in: statement),
             occurredAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 6)),
             metadata: metadata
+        )
+    }
+
+    private func transcriptRecord(from statement: OpaquePointer?) throws -> TranscriptFileRecord {
+        TranscriptFileRecord(
+            id: try stringColumn(0, in: statement),
+            planningArtifactID: try stringColumn(1, in: statement),
+            agentSessionID: try stringColumn(2, in: statement),
+            relativePath: try stringColumn(3, in: statement),
+            byteOffsetStart: sqlite3_column_int64(statement, 4),
+            byteOffsetEnd: sqlite3_column_int64(statement, 5),
+            byteCount: sqlite3_column_int64(statement, 6),
+            capturedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 7))
         )
     }
 

@@ -176,6 +176,7 @@ private func guardedStopService(
         configuredRepositoryURL: URL(fileURLWithPath: "/repo"),
         baselineCapturer: GuardedStopBaselineCapturer(),
         tmuxLauncher: GuardedStopTmuxLauncher(),
+        transcriptCapturer: DisabledWrappedSessionTranscriptCapturer(),
         sessionStopper: stopper,
         sessionStore: sessionStore,
         sessionIDGenerator: { "session-11" }

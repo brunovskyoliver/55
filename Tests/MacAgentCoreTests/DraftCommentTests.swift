@@ -134,6 +134,7 @@ private func draftService(
         configuredRepositoryURL: URL(fileURLWithPath: "/repo"),
         baselineCapturer: DraftBaselineCapturer(),
         tmuxLauncher: DraftTmuxLauncher(),
+        transcriptCapturer: DisabledWrappedSessionTranscriptCapturer(),
         inputSender: DraftNoopInputSender(),
         approvalDecisionSender: DraftNoopApprovalDecisionSender(),
         commentPoster: commentPoster,
