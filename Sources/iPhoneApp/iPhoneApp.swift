@@ -29,16 +29,20 @@ final class PlanningCenteredStore {
     var errorText: String?
     var isLoading = false
     var isAttaching = false
+    var isStartingSession = false
 
     private let loadState: @Sendable () async throws -> PlanningCenteredState
     private let attachPlanningArtifact: @Sendable (AttachPlanningArtifactRequest) async throws -> PlanningCenteredState
+    private let startWrappedSession: @Sendable () async throws -> PlanningCenteredState
 
     init(
         loadState: @escaping @Sendable () async throws -> PlanningCenteredState,
-        attachPlanningArtifact: @escaping @Sendable (AttachPlanningArtifactRequest) async throws -> PlanningCenteredState
+        attachPlanningArtifact: @escaping @Sendable (AttachPlanningArtifactRequest) async throws -> PlanningCenteredState,
+        startWrappedSession: @escaping @Sendable () async throws -> PlanningCenteredState
     ) {
         self.loadState = loadState
         self.attachPlanningArtifact = attachPlanningArtifact
+        self.startWrappedSession = startWrappedSession
     }
 
     func foregroundSync() async {
@@ -71,6 +75,25 @@ final class PlanningCenteredStore {
             errorText = "Planning Artifact attachment failed: \(error)"
         }
     }
+
+    func startSession() async {
+        isStartingSession = true
+        defer { isStartingSession = false }
+
+        do {
+            state = try await startWrappedSession()
+            errorText = nil
+        } catch let error as ForegroundStateClientError {
+            switch error {
+            case .requestFailed(_, let message):
+                errorText = message
+            default:
+                errorText = "Wrapped Session start failed: \(error)"
+            }
+        } catch {
+            errorText = "Wrapped Session start failed: \(error)"
+        }
+    }
 }
 
 extension PlanningCenteredStore {
@@ -82,6 +105,11 @@ extension PlanningCenteredStore {
         let baseURL = URL(string: "https://127.0.0.1:5577")!
         let client = HTTPForegroundStateClient(baseURL: baseURL)
         let response = try await client.attachPlanningArtifact(request)
+        return try PlanningStateMapper().map(response.foregroundState)
+    } startWrappedSession: {
+        let baseURL = URL(string: "https://127.0.0.1:5577")!
+        let client = HTTPForegroundStateClient(baseURL: baseURL)
+        let response = try await client.startWrappedSession()
         return try PlanningStateMapper().map(response.foregroundState)
     }
 }
@@ -138,9 +166,7 @@ struct PlanningCenteredView: View {
             PlanningArtifactAttachmentSection(loader: loader)
             PlanningArtifactSection(artifact: state.activePlanningArtifact)
 
-            if let attachedSession = state.attachedSession {
-                AgentSessionSection(session: attachedSession)
-            }
+            AgentSessionSection(session: state.attachedSession, loader: loader)
 
             StructuredActionsSection(actions: state.structuredActions)
             PlaceholderSection(summary: state.fileReview)
@@ -204,21 +230,43 @@ struct PlanningArtifactAttachmentSection: View {
 }
 
 struct AgentSessionSection: View {
-    let session: AttachedSessionSummary
+    let session: AttachedSessionSummary?
+    @Bindable var loader: PlanningCenteredStore
 
     var body: some View {
         Section("Attached Session") {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(session.title)
-                    .font(.headline)
-                Text(session.stateText)
-                    .font(.subheadline)
-                    .foregroundStyle(.green)
-                Text(session.summary)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+            if let session {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(session.title)
+                        .font(.headline)
+                    Text(session.stateText)
+                        .font(.subheadline)
+                        .foregroundStyle(.green)
+                    Text(session.summary)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    if let tmuxAttachCommand = session.tmuxAttachCommand {
+                        Text(tmuxAttachCommand)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                    }
+                    if let baselineSummary = session.baselineSummary {
+                        Text(baselineSummary)
+                            .font(.caption)
+                            .foregroundStyle(session.baselineIsDirty ? .orange : .secondary)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+            } else {
+                Button {
+                    Task {
+                        await loader.startSession()
+                    }
+                } label: {
+                    Label("Start Wrapped Session", systemImage: "play.fill")
+                }
+                .disabled(loader.isStartingSession)
             }
-            .accessibilityElement(children: .combine)
         }
     }
 }

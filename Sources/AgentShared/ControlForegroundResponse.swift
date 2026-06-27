@@ -1,6 +1,7 @@
 import Foundation
 
 public struct ControlForegroundResponse: Codable, Equatable, Sendable {
+    public var configuredRepository: ConfiguredRepository?
     public var planningArtifacts: [PlanningArtifact]
     public var activePlanningArtifactID: PlanningArtifact.ID?
     public var attachedSessions: [AttachedSession]
@@ -9,6 +10,7 @@ public struct ControlForegroundResponse: Codable, Equatable, Sendable {
     public var auditTimeline: AuditTimelinePlaceholder
 
     public init(
+        configuredRepository: ConfiguredRepository? = nil,
         planningArtifacts: [PlanningArtifact],
         activePlanningArtifactID: PlanningArtifact.ID?,
         attachedSessions: [AttachedSession],
@@ -16,12 +18,23 @@ public struct ControlForegroundResponse: Codable, Equatable, Sendable {
         fileReview: FileReviewPlaceholder,
         auditTimeline: AuditTimelinePlaceholder
     ) {
+        self.configuredRepository = configuredRepository
         self.planningArtifacts = planningArtifacts
         self.activePlanningArtifactID = activePlanningArtifactID
         self.attachedSessions = attachedSessions
         self.structuredActionAvailability = structuredActionAvailability
         self.fileReview = fileReview
         self.auditTimeline = auditTimeline
+    }
+}
+
+public struct ConfiguredRepository: Codable, Equatable, Identifiable, Sendable {
+    public var id: String
+    public var path: String
+
+    public init(id: String, path: String) {
+        self.id = id
+        self.path = path
     }
 }
 
@@ -60,12 +73,23 @@ public struct AgentSession: Codable, Equatable, Identifiable, Sendable {
     public var displayName: String
     public var state: State
     public var summary: String
+    public var tmuxAttachment: TmuxAttachmentInfo?
+    public var worktreeBaseline: WorktreeBaselineSummary?
 
-    public init(id: String, displayName: String, state: State, summary: String) {
+    public init(
+        id: String,
+        displayName: String,
+        state: State,
+        summary: String,
+        tmuxAttachment: TmuxAttachmentInfo? = nil,
+        worktreeBaseline: WorktreeBaselineSummary? = nil
+    ) {
         self.id = id
         self.displayName = displayName
         self.state = state
         self.summary = summary
+        self.tmuxAttachment = tmuxAttachment
+        self.worktreeBaseline = worktreeBaseline
     }
 }
 
@@ -77,6 +101,46 @@ public struct AttachedSession: Codable, Equatable, Identifiable, Sendable {
     public init(planningArtifactID: PlanningArtifact.ID, session: AgentSession) {
         self.planningArtifactID = planningArtifactID
         self.session = session
+    }
+}
+
+public struct WorktreeBaselineSummary: Codable, Equatable, Sendable {
+    public var repositoryPath: String
+    public var branchName: String
+    public var headSHA: String?
+    public var isDirty: Bool
+    public var changedFileCount: Int
+    public var summary: String
+    public var capturedAt: Date
+
+    public init(
+        repositoryPath: String,
+        branchName: String,
+        headSHA: String?,
+        isDirty: Bool,
+        changedFileCount: Int,
+        summary: String,
+        capturedAt: Date
+    ) {
+        self.repositoryPath = repositoryPath
+        self.branchName = branchName
+        self.headSHA = headSHA
+        self.isDirty = isDirty
+        self.changedFileCount = changedFileCount
+        self.summary = summary
+        self.capturedAt = capturedAt
+    }
+}
+
+public struct TmuxAttachmentInfo: Codable, Equatable, Sendable {
+    public var sessionName: String
+    public var windowName: String
+    public var attachCommand: String
+
+    public init(sessionName: String, windowName: String, attachCommand: String) {
+        self.sessionName = sessionName
+        self.windowName = windowName
+        self.attachCommand = attachCommand
     }
 }
 

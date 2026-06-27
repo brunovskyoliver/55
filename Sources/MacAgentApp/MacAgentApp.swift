@@ -25,6 +25,8 @@ final class MacAgentRuntime: ObservableObject {
     @Published var pairingExpiresText = "Unavailable"
     @Published var activeArtifactTitle = "No Planning Artifact"
     @Published var sessionStateText = "Unavailable"
+    @Published var tmuxAttachmentText = "Unavailable"
+    @Published var baselineText = "Unavailable"
     @Published var errorText: String?
 
     private let service = DemoControlService()
@@ -70,10 +72,24 @@ final class MacAgentRuntime: ObservableObject {
         do {
             let response = try service.foregroundState()
             let active = response.planningArtifacts.first { $0.id == response.activePlanningArtifactID }
+            let session = response.attachedSessions.first?.session
             activeArtifactTitle = active?.title ?? "No Planning Artifact"
-            sessionStateText = response.attachedSessions.first?.session.state.rawValue.capitalized ?? "No Agent Session"
+            sessionStateText = session?.state.rawValue.capitalized ?? "No Agent Session"
+            tmuxAttachmentText = session?.tmuxAttachment?.attachCommand ?? "No tmux session"
+            baselineText = session?.worktreeBaseline?.summary ?? "No Worktree Baseline"
         } catch {
             errorText = "Demo state unavailable: \(error)"
+        }
+    }
+
+    func startWrappedSession() {
+        do {
+            _ = try service.startWrappedSession()
+            refreshSnapshot()
+            errorText = nil
+        } catch {
+            errorText = "Wrapped Session failed to start: \(error)"
+            refreshSnapshot()
         }
     }
 }
@@ -92,6 +108,8 @@ struct MacAgentMenuView: View {
                 StatusRow(title: "Pairing Expires", value: runtime.pairingExpiresText)
                 StatusRow(title: "Planning Artifact", value: runtime.activeArtifactTitle)
                 StatusRow(title: "Agent Session", value: runtime.sessionStateText)
+                StatusRow(title: "tmux Attach", value: runtime.tmuxAttachmentText)
+                StatusRow(title: "Worktree Baseline", value: runtime.baselineText)
             }
 
             if let errorText = runtime.errorText {
@@ -107,6 +125,12 @@ struct MacAgentMenuView: View {
                 runtime.refreshSnapshot()
             } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
+            }
+
+            Button {
+                runtime.startWrappedSession()
+            } label: {
+                Label("Start Wrapped Session", systemImage: "play.fill")
             }
 
             Button(role: .destructive) {

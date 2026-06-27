@@ -9,6 +9,10 @@ public protocol PlanningArtifactAttachmentClient: Sendable {
     func attachPlanningArtifact(_ request: AttachPlanningArtifactRequest) async throws -> AttachPlanningArtifactResponse
 }
 
+public protocol WrappedSessionStartClient: Sendable {
+    func startWrappedSession(_ request: StartWrappedSessionRequest) async throws -> StartWrappedSessionResponse
+}
+
 public struct HTTPForegroundStateClient: ForegroundStateClient {
     private let baseURL: URL
     private let credentials: PairedControlCredentials?
@@ -76,6 +80,32 @@ extension HTTPForegroundStateClient: PlanningArtifactAttachmentClient {
         }
 
         return try decoder.decode(AttachPlanningArtifactResponse.self, from: data)
+    }
+}
+
+extension HTTPForegroundStateClient: WrappedSessionStartClient {
+    public func startWrappedSession(_ request: StartWrappedSessionRequest = StartWrappedSessionRequest()) async throws -> StartWrappedSessionResponse {
+        guard baseURL.scheme == "https" else {
+            throw ForegroundStateClientError.pairedTLSRequired
+        }
+
+        var urlRequest = authorizedRequest(url: baseURL.appending(path: "v1/agent-session/start"))
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.httpBody = try encoder.encode(request)
+
+        let (data, response) = try await session.data(for: urlRequest)
+
+        if let httpResponse = response as? HTTPURLResponse,
+           !(200..<300).contains(httpResponse.statusCode) {
+            let errorResponse = try? decoder.decode(ControlAPIErrorResponse.self, from: data)
+            throw ForegroundStateClientError.requestFailed(
+                statusCode: httpResponse.statusCode,
+                message: errorResponse?.message ?? "Wrapped Session start failed."
+            )
+        }
+
+        return try decoder.decode(StartWrappedSessionResponse.self, from: data)
     }
 }
 

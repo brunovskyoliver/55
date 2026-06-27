@@ -9,9 +9,10 @@ final class DemoControlServiceTests: XCTestCase {
         XCTAssertEqual(response.planningArtifacts.count, 1)
         XCTAssertEqual(response.planningArtifacts.first?.id, "issue-2")
         XCTAssertEqual(response.planningArtifacts.first?.kind, .issue)
+        XCTAssertNotNil(response.configuredRepository)
         XCTAssertEqual(response.activePlanningArtifactID, "issue-2")
-        XCTAssertEqual(response.attachedSessions.first?.session.state, .running)
-        XCTAssertTrue(response.structuredActionAvailability.guardedStop.isAvailable)
+        XCTAssertEqual(response.attachedSessions.count, 0)
+        XCTAssertFalse(response.structuredActionAvailability.guardedStop.isAvailable)
         XCTAssertEqual(response.fileReview.status, "placeholder")
         XCTAssertEqual(response.auditTimeline.entries.count, 1)
     }
@@ -33,7 +34,7 @@ final class DemoControlServiceTests: XCTestCase {
         let foregroundState = try decoder.decode(ControlForegroundResponse.self, from: httpResponse.body)
 
         XCTAssertEqual(foregroundState.activePlanningArtifactID, "issue-2")
-        XCTAssertEqual(foregroundState.attachedSessions.first?.session.displayName, "Demo Agent Session")
+        XCTAssertEqual(foregroundState.attachedSessions.count, 0)
     }
 
     func testLocalControlAPIExposesForegroundStateResponse() async throws {
@@ -63,7 +64,7 @@ final class DemoControlServiceTests: XCTestCase {
         let foregroundState = try decoder.decode(ControlForegroundResponse.self, from: data)
 
         XCTAssertEqual(foregroundState.activePlanningArtifactID, "issue-2")
-        XCTAssertEqual(foregroundState.attachedSessions.first?.session.displayName, "Demo Agent Session")
+        XCTAssertEqual(foregroundState.attachedSessions.count, 0)
     }
     #endif
 }

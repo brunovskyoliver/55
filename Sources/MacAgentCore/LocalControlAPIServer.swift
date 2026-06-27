@@ -28,6 +28,7 @@ public struct LocalControlAPIHTTPResponse: Equatable, Sendable {
 public struct LocalControlAPIResponder: Sendable {
     private let provider: any ControlAPIProviding
     private let artifactAttacher: (any PlanningArtifactAttaching)?
+    private let sessionStarter: (any WrappedSessionStarting)?
     private let pairingService: MacPairingService?
     private let securityPolicy: ControlAPISecurityPolicy
     private let encoder: JSONEncoder
@@ -40,6 +41,7 @@ public struct LocalControlAPIResponder: Sendable {
     ) {
         self.provider = provider
         self.artifactAttacher = provider as? any PlanningArtifactAttaching
+        self.sessionStarter = provider as? any WrappedSessionStarting
         self.pairingService = pairingService
         self.securityPolicy = securityPolicy
         self.encoder = JSONEncoder()
@@ -72,6 +74,15 @@ public struct LocalControlAPIResponder: Sendable {
             return planningArtifactAttachmentResponse(body: request.body)
         }
 
+        if request.method == "POST", request.path == LocalControlAPIServer.wrappedSessionStartPath {
+            let authorization = securityPolicy.authorize(request: request, channelSecurity: channelSecurity)
+            guard case .authorized = authorization else {
+                return authorizationFailureResponse(authorization)
+            }
+
+            return wrappedSessionStartResponse(body: request.body)
+        }
+
         if request.method == "POST", request.path == LocalControlAPIServer.pairingCompletionPath {
             let authorization = securityPolicy.authorizePairingCompletion(channelSecurity: channelSecurity)
             guard case .authorized = authorization else {
@@ -87,6 +98,43 @@ public struct LocalControlAPIResponder: Sendable {
             contentType: "text/plain; charset=utf-8",
             body: Data("Not Found".utf8)
         )
+    }
+
+    private func wrappedSessionStartResponse(body: Data) -> LocalControlAPIHTTPResponse {
+        guard let sessionStarter else {
+            return jsonErrorResponse(
+                status: "503 Service Unavailable",
+                statusCode: 503,
+                errorCode: "wrapped_session_start_unavailable",
+                message: "This Mac Agent cannot start a Wrapped Session."
+            )
+        }
+
+        do {
+            let request = body.isEmpty
+                ? StartWrappedSessionRequest()
+                : try decoder.decode(StartWrappedSessionRequest.self, from: body)
+            return LocalControlAPIHTTPResponse(
+                status: "200 OK",
+                statusCode: 200,
+                contentType: "application/json",
+                body: try encoder.encode(sessionStarter.startWrappedSession(request))
+            )
+        } catch let error as WrappedSessionLaunchError {
+            return jsonErrorResponse(
+                status: wrappedSessionFailureStatus(for: error),
+                statusCode: wrappedSessionFailureStatusCode(for: error),
+                errorCode: error.apiErrorCode,
+                message: error.userMessage
+            )
+        } catch {
+            return jsonErrorResponse(
+                status: "400 Bad Request",
+                statusCode: 400,
+                errorCode: "wrapped_session_start_failed",
+                message: "The Wrapped Session could not be started."
+            )
+        }
     }
 
     private func planningArtifactAttachmentResponse(body: Data) -> LocalControlAPIHTTPResponse {
@@ -263,12 +311,33 @@ public struct LocalControlAPIResponder: Sendable {
             return 502
         }
     }
+
+    private func wrappedSessionFailureStatus(for error: WrappedSessionLaunchError) -> String {
+        switch error {
+        case .noActivePlanningArtifact:
+            return "409 Conflict"
+        case .activeSessionAlreadyRunning:
+            return "409 Conflict"
+        case .baselineCaptureFailed, .tmuxLaunchFailed:
+            return "502 Bad Gateway"
+        }
+    }
+
+    private func wrappedSessionFailureStatusCode(for error: WrappedSessionLaunchError) -> Int {
+        switch error {
+        case .noActivePlanningArtifact, .activeSessionAlreadyRunning:
+            return 409
+        case .baselineCaptureFailed, .tmuxLaunchFailed:
+            return 502
+        }
+    }
 }
 
 public final class LocalControlAPIServer: @unchecked Sendable {
     public static let foregroundStatePath = "/v1/foreground-state"
     public static let pairingCompletionPath = "/v1/pairings/complete"
     public static let planningArtifactAttachmentPath = "/v1/planning-artifact/attachment"
+    public static let wrappedSessionStartPath = "/v1/agent-session/start"
 
     private let responder: LocalControlAPIResponder
     private let requestedPort: UInt16

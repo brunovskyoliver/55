@@ -12,15 +12,15 @@ final class PlanningStateMapperTests: XCTestCase {
         XCTAssertEqual(state.activePlanningArtifact.label, "Issue #2")
         XCTAssertEqual(state.activePlanningArtifact.affordanceTitle, "Issue Planning")
         XCTAssertEqual(state.activePlanningArtifact.state, "Open")
-        XCTAssertEqual(state.attachedSession?.id, "demo-session-1")
-        XCTAssertEqual(state.attachedSession?.stateText, "Running")
+        XCTAssertNotNil(state.configuredRepositoryPath)
+        XCTAssertNil(state.attachedSession)
         XCTAssertEqual(state.fileReview.title, "File Review")
         XCTAssertTrue(state.fileReview.detail.contains("Changed files: 0"))
         XCTAssertEqual(state.auditTimeline.title, "Audit Timeline placeholder")
 
         let guardedStop = try XCTUnwrap(state.structuredActions.first { $0.id == "guarded-stop" })
-        XCTAssertTrue(guardedStop.isAvailable)
-        XCTAssertEqual(guardedStop.reason, "Demo session is running")
+        XCTAssertFalse(guardedStop.isAvailable)
+        XCTAssertEqual(guardedStop.reason, "No Agent Session")
     }
 
     func testLoaderFetchesAndMapsForegroundState() async throws {
@@ -29,7 +29,7 @@ final class PlanningStateMapperTests: XCTestCase {
         let state = try await loader.load()
 
         XCTAssertEqual(state.activePlanningArtifact.title, "Scaffold Apple App Codebase with a demo Control API path")
-        XCTAssertEqual(state.attachedSession?.summary, "Foreground Sync is connected to the seeded Mac Agent response.")
+        XCTAssertNil(state.attachedSession)
     }
 
     func testMapperDistinguishesPRReviewAffordance() throws {

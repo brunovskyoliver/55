@@ -2,6 +2,7 @@ import AgentShared
 import Foundation
 
 public struct PlanningCenteredState: Equatable, Sendable {
+    public var configuredRepositoryPath: String?
     public var activePlanningArtifact: PlanningArtifactSummary
     public var attachedSession: AttachedSessionSummary?
     public var structuredActions: [StructuredActionSummary]
@@ -9,12 +10,14 @@ public struct PlanningCenteredState: Equatable, Sendable {
     public var auditTimeline: PlaceholderSummary
 
     public init(
+        configuredRepositoryPath: String? = nil,
         activePlanningArtifact: PlanningArtifactSummary,
         attachedSession: AttachedSessionSummary?,
         structuredActions: [StructuredActionSummary],
         fileReview: PlaceholderSummary,
         auditTimeline: PlaceholderSummary
     ) {
+        self.configuredRepositoryPath = configuredRepositoryPath
         self.activePlanningArtifact = activePlanningArtifact
         self.attachedSession = attachedSession
         self.structuredActions = structuredActions
@@ -46,12 +49,26 @@ public struct AttachedSessionSummary: Equatable, Identifiable, Sendable {
     public var title: String
     public var stateText: String
     public var summary: String
+    public var tmuxAttachCommand: String?
+    public var baselineSummary: String?
+    public var baselineIsDirty: Bool
 
-    public init(id: String, title: String, stateText: String, summary: String) {
+    public init(
+        id: String,
+        title: String,
+        stateText: String,
+        summary: String,
+        tmuxAttachCommand: String? = nil,
+        baselineSummary: String? = nil,
+        baselineIsDirty: Bool = false
+    ) {
         self.id = id
         self.title = title
         self.stateText = stateText
         self.summary = summary
+        self.tmuxAttachCommand = tmuxAttachCommand
+        self.baselineSummary = baselineSummary
+        self.baselineIsDirty = baselineIsDirty
     }
 }
 
@@ -96,6 +113,7 @@ public struct PlanningStateMapper: PlanningStateMapping {
             .map(sessionSummary)
 
         return PlanningCenteredState(
+            configuredRepositoryPath: response.configuredRepository?.path,
             activePlanningArtifact: artifactSummary(activeArtifact),
             attachedSession: attachedSession,
             structuredActions: actionSummaries(response.structuredActionAvailability),
@@ -134,7 +152,10 @@ public struct PlanningStateMapper: PlanningStateMapping {
             id: attachment.session.id,
             title: attachment.session.displayName,
             stateText: attachment.session.state.displayText,
-            summary: attachment.session.summary
+            summary: attachment.session.summary,
+            tmuxAttachCommand: attachment.session.tmuxAttachment?.attachCommand,
+            baselineSummary: attachment.session.worktreeBaseline?.summary,
+            baselineIsDirty: attachment.session.worktreeBaseline?.isDirty ?? false
         )
     }
 
