@@ -108,7 +108,7 @@
 			mainGroup = 26E6BE58F866B96C7C19CDC5;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				12D3FEA9612AFFC277529492 /* XCLocalSwiftPackageReference "..//" */,
+				C37907D93885161518BE9B0A /* XCLocalSwiftPackageReference ".." */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 490E3EE4186F3146630BE7E8 /* Products */;
@@ -317,15 +317,16 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		12D3FEA9612AFFC277529492 /* XCLocalSwiftPackageReference "..//" */ = {
+		C37907D93885161518BE9B0A /* XCLocalSwiftPackageReference ".." */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = "..//";
+			relativePath = ..;
 		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		609E242329B642B7C28C00E0 /* iPhoneApp */ = {
 			isa = XCSwiftPackageProductDependency;
+			package = C37907D93885161518BE9B0A /* XCLocalSwiftPackageReference ".." */;
 			productName = iPhoneApp;
 		};
 /* End XCSwiftPackageProductDependency section */

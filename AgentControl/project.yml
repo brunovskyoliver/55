@@ -8,7 +8,7 @@ options:
 
 packages:
   AgentSessionControl:
-    path: ../
+    path: ..
 
 targets:
   AgentControl:

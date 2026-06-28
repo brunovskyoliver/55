@@ -21,7 +21,7 @@ public struct AppRootView: View {
     public init() {}
     @State private var credentials: PairedControlCredentials? = loadStoredCredentials()
 
-    var body: some View {
+    public var body: some View {
         if let creds = credentials {
             PlanningCenteredRootView(loader: .pairedAPI(credentials: creds))
                 .toolbar {
