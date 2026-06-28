@@ -3,6 +3,8 @@ import Foundation
 
 public struct PlanningCenteredState: Equatable, Sendable {
     public var configuredRepositoryPath: String?
+    public var macDeviceInfo: MacDeviceInfoSummary?
+    public var activeAttachedSessionCount: Int
     public var activePlanningArtifact: PlanningArtifactSummary
     public var attachedSession: AttachedSessionSummary?
     public var pendingApprovalRequest: ApprovalRequestSummary?
@@ -13,6 +15,8 @@ public struct PlanningCenteredState: Equatable, Sendable {
 
     public init(
         configuredRepositoryPath: String? = nil,
+        macDeviceInfo: MacDeviceInfoSummary? = nil,
+        activeAttachedSessionCount: Int = 0,
         activePlanningArtifact: PlanningArtifactSummary,
         attachedSession: AttachedSessionSummary?,
         pendingApprovalRequest: ApprovalRequestSummary? = nil,
@@ -22,6 +26,8 @@ public struct PlanningCenteredState: Equatable, Sendable {
         auditTimeline: AuditTimelineSummary
     ) {
         self.configuredRepositoryPath = configuredRepositoryPath
+        self.macDeviceInfo = macDeviceInfo
+        self.activeAttachedSessionCount = activeAttachedSessionCount
         self.activePlanningArtifact = activePlanningArtifact
         self.attachedSession = attachedSession
         self.pendingApprovalRequest = pendingApprovalRequest
@@ -29,6 +35,18 @@ public struct PlanningCenteredState: Equatable, Sendable {
         self.structuredActions = structuredActions
         self.fileReview = fileReview
         self.auditTimeline = auditTimeline
+    }
+}
+
+public struct MacDeviceInfoSummary: Equatable, Sendable {
+    public var name: String
+    public var osVersion: String
+    public var modelIdentifier: String?
+
+    public init(name: String, osVersion: String, modelIdentifier: String?) {
+        self.name = name
+        self.osVersion = osVersion
+        self.modelIdentifier = modelIdentifier
     }
 }
 
@@ -262,6 +280,8 @@ public struct PlanningStateMapper: PlanningStateMapping {
 
         return PlanningCenteredState(
             configuredRepositoryPath: response.configuredRepository?.path,
+            macDeviceInfo: response.macDeviceInfo.map(macDeviceInfoSummary),
+            activeAttachedSessionCount: response.attachedSessions.filter { $0.session.state.isActiveWrappedSession }.count,
             activePlanningArtifact: artifactSummary(activeArtifact),
             attachedSession: attachedSession,
             pendingApprovalRequest: response.pendingApprovalRequest.map(approvalRequestSummary),
@@ -298,6 +318,14 @@ public struct PlanningStateMapper: PlanningStateMapping {
             title: artifact.title,
             state: artifact.state.capitalized,
             url: artifact.url
+        )
+    }
+
+    private func macDeviceInfoSummary(_ info: MacDeviceInfo) -> MacDeviceInfoSummary {
+        MacDeviceInfoSummary(
+            name: info.name,
+            osVersion: info.osVersion,
+            modelIdentifier: info.modelIdentifier
         )
     }
 
@@ -457,6 +485,15 @@ private extension AgentSession.State {
             return "Stopped"
         case .failedToStop:
             return "Failed to Stop"
+        }
+    }
+
+    var isActiveWrappedSession: Bool {
+        switch self {
+        case .running, .waitingForInput, .waitingForApproval, .stopping, .failedToStop:
+            return true
+        case .idle, .stopped:
+            return false
         }
     }
 }

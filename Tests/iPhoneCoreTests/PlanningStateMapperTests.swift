@@ -13,6 +13,8 @@ final class PlanningStateMapperTests: XCTestCase {
         XCTAssertEqual(state.activePlanningArtifact.affordanceTitle, "Issue Planning")
         XCTAssertEqual(state.activePlanningArtifact.state, "Open")
         XCTAssertNotNil(state.configuredRepositoryPath)
+        XCTAssertNotNil(state.macDeviceInfo)
+        XCTAssertEqual(state.activeAttachedSessionCount, 0)
         XCTAssertNil(state.attachedSession)
         XCTAssertEqual(state.fileReview.title, "File Review")
         XCTAssertTrue(state.fileReview.detail.contains("Changed files: 0"))
@@ -64,6 +66,68 @@ final class PlanningStateMapperTests: XCTestCase {
 
         XCTAssertEqual(state.activePlanningArtifact.label, "PR #4")
         XCTAssertEqual(state.activePlanningArtifact.affordanceTitle, "PR Review")
+    }
+
+    func testMapperCarriesMacDeviceInfoWhenPresentAndNilWhenOmitted() throws {
+        let response = ControlForegroundResponse(
+            macDeviceInfo: MacDeviceInfo(
+                name: "Development Mac",
+                osVersion: "Version 14.5 (Build 23F79)",
+                modelIdentifier: "Mac14,2"
+            ),
+            planningArtifacts: [
+                PlanningArtifact(
+                    id: "issue-18",
+                    kind: .issue,
+                    number: 18,
+                    title: "Mac info screen",
+                    url: URL(string: "https://github.com/brunovskyoliver/55/issues/18")!,
+                    state: "open"
+                )
+            ],
+            activePlanningArtifactID: "issue-18",
+            attachedSessions: [
+                AttachedSession(
+                    planningArtifactID: "issue-18",
+                    session: AgentSession(
+                        id: "session-running",
+                        displayName: "Claude Code Wrapped Session",
+                        state: .running,
+                        summary: "Running."
+                    )
+                ),
+                AttachedSession(
+                    planningArtifactID: "issue-18",
+                    session: AgentSession(
+                        id: "session-stopped",
+                        displayName: "Claude Code Wrapped Session",
+                        state: .stopped,
+                        summary: "Stopped."
+                    )
+                )
+            ],
+            structuredActionAvailability: StructuredActionAvailability(
+                reply: StructuredActionState(isAvailable: false, reason: "No Pending Input"),
+                approve: StructuredActionState(isAvailable: false, reason: "No approval request"),
+                deny: StructuredActionState(isAvailable: false, reason: "No approval request"),
+                draftComment: StructuredActionState(isAvailable: false, reason: "No draft"),
+                guardedStop: StructuredActionState(isAvailable: false, reason: "No session")
+            ),
+            fileReview: FileReviewPlaceholder(status: "placeholder", summary: "Unavailable", changedFileCount: 0),
+            auditTimeline: AuditTimelinePlaceholder(summary: "Audit Timeline", entries: [])
+        )
+
+        let state = try PlanningStateMapper().map(response)
+
+        XCTAssertEqual(state.macDeviceInfo?.name, "Development Mac")
+        XCTAssertEqual(state.macDeviceInfo?.osVersion, "Version 14.5 (Build 23F79)")
+        XCTAssertEqual(state.macDeviceInfo?.modelIdentifier, "Mac14,2")
+        XCTAssertEqual(state.activeAttachedSessionCount, 1)
+
+        var legacyResponse = response
+        legacyResponse.macDeviceInfo = nil
+        let legacyState = try PlanningStateMapper().map(legacyResponse)
+        XCTAssertNil(legacyState.macDeviceInfo)
     }
 
     func testMapperCarriesCompactAuditTimelineEntries() throws {

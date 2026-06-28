@@ -20,20 +20,26 @@ public struct iPhoneApp: App {
 public struct AppRootView: View {
     public init() {}
     @State private var credentials: PairedControlCredentials? = loadStoredCredentials()
+    @State private var localDisconnectWarning: String?
 
     public var body: some View {
         if let creds = credentials {
-            PlanningCenteredRootView(loader: .pairedAPI(credentials: creds))
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button("Unpair") {
-                            clearStoredCredentials()
-                            credentials = nil
-                        }
-                    }
+            PlanningCenteredRootView(
+                loader: .pairedAPI(credentials: creds),
+                credentials: creds,
+                onDisconnected: {
+                    localDisconnectWarning = nil
+                    credentials = nil
+                },
+                onLocalDisconnect: { warning in
+                    clearStoredCredentials()
+                    localDisconnectWarning = warning
+                    credentials = nil
                 }
+            )
         } else {
-            PairingView { paired in
+            PairingView(localDisconnectWarning: localDisconnectWarning) { paired in
+                localDisconnectWarning = nil
                 storeCredentials(paired)
                 credentials = paired
             }
@@ -71,6 +77,7 @@ private func clearStoredCredentials() {
 /// The scanner requires `NSCameraUsageDescription` in Info.plist and a physical device.
 /// The paste fallback works in any build configuration.
 struct PairingView: View {
+    var localDisconnectWarning: String?
     var onPaired: (PairedControlCredentials) -> Void
 
     @State private var manualPayload = ""
@@ -93,6 +100,14 @@ struct PairingView: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal)
+
+                if let localDisconnectWarning {
+                    Text(localDisconnectWarning)
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                }
 
                 if DataScannerViewController.isSupported && DataScannerViewController.isAvailable {
                     Button {
@@ -555,9 +570,20 @@ extension PlanningCenteredStore {
 
 struct PlanningCenteredRootView: View {
     @State private var loader: PlanningCenteredStore
+    let credentials: PairedControlCredentials
+    let onDisconnected: () -> Void
+    let onLocalDisconnect: (String) -> Void
 
-    init(loader: PlanningCenteredStore) {
+    init(
+        loader: PlanningCenteredStore,
+        credentials: PairedControlCredentials,
+        onDisconnected: @escaping () -> Void,
+        onLocalDisconnect: @escaping (String) -> Void
+    ) {
         _loader = State(wrappedValue: loader)
+        self.credentials = credentials
+        self.onDisconnected = onDisconnected
+        self.onLocalDisconnect = onLocalDisconnect
     }
 
     var body: some View {
@@ -588,6 +614,20 @@ struct PlanningCenteredRootView: View {
             }
             .navigationTitle("Planning")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    NavigationLink {
+                        MacDetailView(
+                            state: loader.state,
+                            credentials: credentials,
+                            loader: loader,
+                            onDisconnected: onDisconnected,
+                            onLocalDisconnect: onLocalDisconnect
+                        )
+                    } label: {
+                        Label("Mac", systemImage: "info.circle")
+                    }
+                }
+
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         Task {
@@ -602,6 +642,92 @@ struct PlanningCenteredRootView: View {
         }
         .task {
             await loader.foregroundSync()
+        }
+    }
+}
+
+struct MacDetailView: View {
+    let state: PlanningCenteredState?
+    let credentials: PairedControlCredentials
+    @Bindable var loader: PlanningCenteredStore
+    let onDisconnected: () -> Void
+    let onLocalDisconnect: (String) -> Void
+
+    @State private var isConfirmingDisconnect = false
+    @State private var isOfferingLocalDisconnect = false
+
+    var body: some View {
+        List {
+            Section("Mac") {
+                detailRow(title: "Name", value: state?.macDeviceInfo?.name ?? "Not yet synced")
+                detailRow(title: "macOS", value: state?.macDeviceInfo?.osVersion ?? "Not yet synced")
+                detailRow(title: "Model identifier", value: state?.macDeviceInfo?.modelIdentifier ?? "Not yet synced")
+            }
+
+            Section("Repository & Sessions") {
+                detailRow(title: "Configured Repository", value: state?.configuredRepositoryPath ?? "Not yet synced")
+                detailRow(
+                    title: "Active Attached Sessions",
+                    value: state.map { String($0.activeAttachedSessionCount) } ?? "Not yet synced"
+                )
+            }
+
+            Section("Connection") {
+                detailRow(title: "Control API", value: credentials.controlBaseURL.absoluteString)
+            }
+
+            Section {
+                Button(role: .destructive) {
+                    isConfirmingDisconnect = true
+                } label: {
+                    Label("Disconnect", systemImage: "bolt.horizontal.circle")
+                }
+                .disabled(loader.isDisconnecting)
+            }
+
+            if let errorText = loader.errorText {
+                Section("Error") {
+                    Text(errorText)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+            }
+        }
+        .navigationTitle("Mac")
+        .listStyle(.insetGrouped)
+        .alert("Disconnect from this Mac?", isPresented: $isConfirmingDisconnect) {
+            Button("Disconnect", role: .destructive) {
+                Task {
+                    do {
+                        try await loader.disconnect()
+                        onDisconnected()
+                    } catch {
+                        isOfferingLocalDisconnect = true
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This revokes the Owner Device bearer token on the Mac and removes local credentials.")
+        }
+        .alert("Mac unreachable", isPresented: $isOfferingLocalDisconnect) {
+            Button("Disconnect locally anyway", role: .destructive) {
+                onLocalDisconnect("Disconnected locally. The Mac bearer token was not revoked because the Mac was unreachable.")
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Local credentials will be removed from this iPhone, but the Mac bearer token remains live.")
+        }
+    }
+
+    private func detailRow(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.body)
+                .textSelection(.enabled)
         }
     }
 }
