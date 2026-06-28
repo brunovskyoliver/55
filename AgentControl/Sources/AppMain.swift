@@ -2,4 +2,10 @@ import iPhoneApp
 import SwiftUI
 
 @main
-typealias AgentControlApp = iPhoneApp.iPhoneApp
+struct AppMain: App {
+    var body: some Scene {
+        WindowGroup {
+            AppRootView()
+        }
+    }
+}

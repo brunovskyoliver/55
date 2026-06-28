@@ -17,7 +17,8 @@ public struct iPhoneApp: App {
 }
 
 /// Top-level view that switches between the pairing screen and the main planning UI.
-struct AppRootView: View {
+public struct AppRootView: View {
+    public init() {}
     @State private var credentials: PairedControlCredentials? = loadStoredCredentials()
 
     var body: some View {
