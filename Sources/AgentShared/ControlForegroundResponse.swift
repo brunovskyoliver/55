@@ -2,6 +2,7 @@ import Foundation
 
 public struct ControlForegroundResponse: Codable, Equatable, Sendable {
     public var configuredRepository: ConfiguredRepository?
+    public var macDeviceInfo: MacDeviceInfo?
     public var planningArtifacts: [PlanningArtifact]
     public var activePlanningArtifactID: PlanningArtifact.ID?
     public var attachedSessions: [AttachedSession]
@@ -14,6 +15,7 @@ public struct ControlForegroundResponse: Codable, Equatable, Sendable {
 
     public init(
         configuredRepository: ConfiguredRepository? = nil,
+        macDeviceInfo: MacDeviceInfo? = nil,
         planningArtifacts: [PlanningArtifact],
         activePlanningArtifactID: PlanningArtifact.ID?,
         attachedSessions: [AttachedSession],
@@ -25,6 +27,7 @@ public struct ControlForegroundResponse: Codable, Equatable, Sendable {
         auditTimeline: AuditTimelinePlaceholder
     ) {
         self.configuredRepository = configuredRepository
+        self.macDeviceInfo = macDeviceInfo
         self.planningArtifacts = planningArtifacts
         self.activePlanningArtifactID = activePlanningArtifactID
         self.attachedSessions = attachedSessions
@@ -34,6 +37,18 @@ public struct ControlForegroundResponse: Codable, Equatable, Sendable {
         self.structuredActionAvailability = structuredActionAvailability
         self.fileReview = fileReview
         self.auditTimeline = auditTimeline
+    }
+}
+
+public struct MacDeviceInfo: Codable, Equatable, Sendable {
+    public var name: String
+    public var osVersion: String
+    public var modelIdentifier: String?
+
+    public init(name: String, osVersion: String, modelIdentifier: String?) {
+        self.name = name
+        self.osVersion = osVersion
+        self.modelIdentifier = modelIdentifier
     }
 }
 

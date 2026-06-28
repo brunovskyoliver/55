@@ -1,4 +1,5 @@
 import AgentShared
+import Darwin
 import Foundation
 
 public protocol ControlAPIProviding: Sendable {
@@ -41,6 +42,37 @@ public protocol DraftCommentDecisionSubmitting: Sendable {
     func submitDraftCommentDecision(_ request: SubmitDraftCommentDecisionRequest) throws -> SubmitDraftCommentDecisionResponse
 }
 
+public protocol MacDeviceInfoProviding: Sendable {
+    func macDeviceInfo() -> MacDeviceInfo
+}
+
+public struct SystemMacDeviceInfoProvider: MacDeviceInfoProviding {
+    public init() {}
+
+    public func macDeviceInfo() -> MacDeviceInfo {
+        MacDeviceInfo(
+            name: Host.current().localizedName ?? "Unknown Mac",
+            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            modelIdentifier: hardwareModelIdentifier()
+        )
+    }
+
+    private func hardwareModelIdentifier() -> String? {
+        var size = 0
+        guard sysctlbyname("hw.model", nil, &size, nil, 0) == 0, size > 0 else {
+            return nil
+        }
+
+        var buffer = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("hw.model", &buffer, &size, nil, 0) == 0 else {
+            return nil
+        }
+
+        let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+}
+
 public final class DemoControlService: ControlAPIProviding, PlanningArtifactAttaching, WrappedSessionStarting, WrappedSessionStopSubmitting, PendingInputSignalAccepting, PendingInputReplySubmitting, ApprovalRequestSignalAccepting, ApprovalDecisionSubmitting, DraftCommentPreparing, DraftCommentDecisionSubmitting, @unchecked Sendable {
     private let resolver: any PlanningArtifactResolving
     private let baselineCapturer: any WorktreeBaselineCapturing
@@ -67,6 +99,7 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
         approvalDecisionSender: any ApprovalDecisionSending = TmuxApprovalDecisionSender(),
         commentPoster: any GitHubCommentPosting = GitHubCLICommentPoster(),
         fileReviewBuilder: any FileReviewBuilding = GitFileReviewBuilder(),
+        macDeviceInfoProvider: any MacDeviceInfoProviding = SystemMacDeviceInfoProvider(),
         sessionStore: any SessionEventStoring = SQLiteSessionStore(
             databaseURL: FileManager.default.temporaryDirectory
                 .appending(path: "AgentSessionControl-\(UUID().uuidString).sqlite")
@@ -98,6 +131,7 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
         self.now = now
         self.state = LockedDemoControlServiceState(
             configuredRepositoryURL: configuredRepositoryURL,
+            macDeviceInfo: macDeviceInfoProvider.macDeviceInfo(),
             sessionStore: sessionStore,
             fileReviewBuilder: fileReviewBuilder
         )
@@ -693,6 +727,7 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
     private let lock = NSLock()
     private let configuredRepositoryURL: URL
     private let configuredRepository: ConfiguredRepository
+    private let macDeviceInfo: MacDeviceInfo
     private let sessionStore: any SessionEventStoring
     private let fileReviewBuilder: any FileReviewBuilding
     private var activeAttachment: PlanningArtifact?
@@ -705,10 +740,12 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
 
     init(
         configuredRepositoryURL: URL,
+        macDeviceInfo: MacDeviceInfo,
         sessionStore: any SessionEventStoring,
         fileReviewBuilder: any FileReviewBuilding
     ) {
         self.configuredRepositoryURL = configuredRepositoryURL
+        self.macDeviceInfo = macDeviceInfo
         self.sessionStore = sessionStore
         self.fileReviewBuilder = fileReviewBuilder
         self.configuredRepository = ConfiguredRepository(
@@ -723,6 +760,7 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
             guard let activeAttachment else {
                 var seededState = DemoControlService.seededForegroundState
                 seededState.configuredRepository = configuredRepository
+                seededState.macDeviceInfo = macDeviceInfo
                 return seededState
             }
 
@@ -1250,6 +1288,7 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
 
         return ControlForegroundResponse(
             configuredRepository: configuredRepository,
+            macDeviceInfo: macDeviceInfo,
             planningArtifacts: [artifact],
             activePlanningArtifactID: artifact.id,
             attachedSessions: attachedSessions,
