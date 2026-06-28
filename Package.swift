@@ -12,8 +12,8 @@ let package = Package(
         .library(name: "AgentShared", targets: ["AgentShared"]),
         .library(name: "MacAgentCore", targets: ["MacAgentCore"]),
         .library(name: "iPhoneCore", targets: ["iPhoneCore"]),
-        .executable(name: "MacAgentApp", targets: ["MacAgentApp"]),
-        .executable(name: "iPhoneApp", targets: ["iPhoneApp"])
+        .library(name: "iPhoneApp", targets: ["iPhoneApp"]),
+        .executable(name: "MacAgentApp", targets: ["MacAgentApp"])
     ],
     targets: [
         .target(name: "AgentShared"),
@@ -29,7 +29,7 @@ let package = Package(
             name: "MacAgentApp",
             dependencies: ["AgentShared", "MacAgentCore"]
         ),
-        .executableTarget(
+        .target(
             name: "iPhoneApp",
             dependencies: ["AgentShared", "iPhoneCore"]
         ),

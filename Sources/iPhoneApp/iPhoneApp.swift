@@ -7,9 +7,9 @@ import VisionKit
 #endif
 
 #if os(iOS)
-@main
-struct iPhoneApp: App {
-    var body: some Scene {
+public struct iPhoneApp: App {
+    public init() {}
+    public var body: some Scene {
         WindowGroup {
             AppRootView()
         }
@@ -470,7 +470,7 @@ extension PlanningCenteredStore {
     /// Uses Bonjour to resolve the current LAN IP at each request, falling back to the stored URL.
     /// When a cert fingerprint is stored, pins the TLS connection to that specific certificate.
     static func pairedAPI(credentials: PairedControlCredentials) -> PlanningCenteredStore {
-        func resolvedClient() async throws -> HTTPForegroundStateClient {
+        @Sendable func resolvedClient() async throws -> HTTPForegroundStateClient {
             // Resolve via Bonjour if we have a service name; fall back to stored URL.
             let baseURL: URL
             if let name = credentials.bonjourServiceName,
