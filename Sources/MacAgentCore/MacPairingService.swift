@@ -56,14 +56,18 @@ public final class MacPairingService: @unchecked Sendable {
     public func generateInvitation(
         macAgentName: String,
         controlBaseURL: URL,
-        timeToLive: TimeInterval = 120
+        timeToLive: TimeInterval = 120,
+        certFingerprintSHA256: String? = nil,
+        bonjourServiceName: String? = nil
     ) throws -> PairingInvitation {
         let invitation = PairingInvitation(
             id: try tokenGenerator.token(byteCount: 12),
             macAgentName: macAgentName,
             controlBaseURL: controlBaseURL,
             expiresAt: clock.now.addingTimeInterval(timeToLive),
-            invitationSecret: try tokenGenerator.token(byteCount: 32)
+            invitationSecret: try tokenGenerator.token(byteCount: 32),
+            certFingerprintSHA256: certFingerprintSHA256,
+            bonjourServiceName: bonjourServiceName
         )
 
         lock.withLock {
@@ -98,7 +102,9 @@ public final class MacPairingService: @unchecked Sendable {
             credentials: PairedControlCredentials(
                 deviceID: material.deviceID,
                 bearerToken: material.bearerToken,
-                controlBaseURL: invitation.controlBaseURL
+                controlBaseURL: invitation.controlBaseURL,
+                certFingerprintSHA256: invitation.certFingerprintSHA256,
+                bonjourServiceName: invitation.bonjourServiceName
             ),
             pairedAt: now
         )

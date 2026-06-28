@@ -2,16 +2,238 @@ import AgentShared
 import Foundation
 import iPhoneCore
 import SwiftUI
+#if os(iOS)
+import VisionKit
+#endif
 
 #if os(iOS)
 @main
 struct iPhoneApp: App {
     var body: some Scene {
         WindowGroup {
-            PlanningCenteredRootView(loader: .localDemoAPI)
+            AppRootView()
         }
     }
 }
+
+/// Top-level view that switches between the pairing screen and the main planning UI.
+struct AppRootView: View {
+    @State private var credentials: PairedControlCredentials? = loadStoredCredentials()
+
+    var body: some View {
+        if let creds = credentials {
+            PlanningCenteredRootView(loader: .pairedAPI(credentials: creds))
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Unpair") {
+                            clearStoredCredentials()
+                            credentials = nil
+                        }
+                    }
+                }
+        } else {
+            PairingView { paired in
+                storeCredentials(paired)
+                credentials = paired
+            }
+        }
+    }
+}
+
+// MARK: - Credential persistence (UserDefaults + Keychain)
+
+private func loadStoredCredentials() -> PairedControlCredentials? {
+    guard let deviceID = UserDefaults.standard.string(forKey: "AgentSessionControl.pairedDeviceID") else {
+        return nil
+    }
+    let store = KeychainPairedControlCredentialStore()
+    return try? store.credentials(forDeviceID: deviceID)
+}
+
+private func storeCredentials(_ credentials: PairedControlCredentials) {
+    UserDefaults.standard.set(credentials.deviceID, forKey: "AgentSessionControl.pairedDeviceID")
+    let store = KeychainPairedControlCredentialStore()
+    try? store.store(credentials)
+}
+
+private func clearStoredCredentials() {
+    UserDefaults.standard.removeObject(forKey: "AgentSessionControl.pairedDeviceID")
+    // Credentials remain in Keychain (no delete API on the existing store); they'll just be unused.
+}
+
+// MARK: - Pairing Screen
+
+/// Shows a camera QR scanner and a manual-paste fallback so the owner can pair with the Mac Agent.
+/// The scanner requires `NSCameraUsageDescription` in Info.plist and a physical device.
+/// The paste fallback works in any build configuration.
+struct PairingView: View {
+    var onPaired: (PairedControlCredentials) -> Void
+
+    @State private var manualPayload = ""
+    @State private var isPairing = false
+    @State private var errorText: String?
+    @State private var showScanner = false
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 24) {
+                Image(systemName: "iphone.and.arrow.forward")
+                    .font(.system(size: 56))
+                    .foregroundStyle(.tint)
+
+                Text("Pair with Mac Agent")
+                    .font(.title2.bold())
+
+                Text("Open the Mac Agent menu bar app and scan the QR code, or paste the pairing code below.")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+
+                if DataScannerViewController.isSupported && DataScannerViewController.isAvailable {
+                    Button {
+                        showScanner = true
+                    } label: {
+                        Label("Scan QR Code", systemImage: "qrcode.viewfinder")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.horizontal)
+                }
+
+                Divider().padding(.horizontal)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Or paste pairing code:")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextEditor(text: $manualPayload)
+                        .frame(height: 80)
+                        .font(.caption.monospaced())
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.separator))
+                        .padding(.horizontal)
+                }
+                .padding(.horizontal)
+
+                if let err = errorText {
+                    Text(err)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                        .padding(.horizontal)
+                }
+
+                Button {
+                    Task { await completePairing(payload: manualPayload) }
+                } label: {
+                    Group {
+                        if isPairing {
+                            ProgressView()
+                        } else {
+                            Text("Connect")
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .padding(.horizontal)
+                .disabled(manualPayload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isPairing)
+
+                Spacer()
+            }
+            .navigationTitle("Setup")
+            .sheet(isPresented: $showScanner) {
+                QRScannerSheet { scanned in
+                    showScanner = false
+                    Task { await completePairing(payload: scanned) }
+                }
+            }
+        }
+    }
+
+    private func completePairing(payload: String) async {
+        isPairing = true
+        errorText = nil
+        defer { isPairing = false }
+
+        let service = OwnerDevicePairingService(
+            client: HTTPPairingCompletionClient(),
+            credentialStore: KeychainPairedControlCredentialStore(),
+            ownerDeviceName: UIDevice.current.name,
+            ownerDevicePublicKey: "placeholder-public-key"
+        )
+
+        do {
+            let response = try await service.completePairing(from: payload.trimmingCharacters(in: .whitespacesAndNewlines))
+            onPaired(response.credentials)
+        } catch OwnerDevicePairingError.pairedTLSRequired {
+            errorText = "Pairing requires a secure connection. Ensure the Mac is reachable on the same Wi-Fi."
+        } catch {
+            errorText = "Pairing failed: \(error.localizedDescription)"
+        }
+    }
+}
+
+/// Wraps `DataScannerViewController` as a SwiftUI sheet for QR code scanning.
+struct QRScannerSheet: View {
+    var onScan: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            DataScannerView(onScan: onScan)
+                .ignoresSafeArea()
+                .navigationTitle("Scan QR Code")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { dismiss() }
+                    }
+                }
+        }
+    }
+}
+
+/// `UIViewControllerRepresentable` wrapping `DataScannerViewController` for QR scanning.
+struct DataScannerView: UIViewControllerRepresentable {
+    var onScan: (String) -> Void
+
+    func makeUIViewController(context: Context) -> DataScannerViewController {
+        let scanner = DataScannerViewController(
+            recognizedDataTypes: [.barcode(symbologies: [.qr])],
+            qualityLevel: .accurate,
+            recognizesMultipleItems: false,
+            isHighlightingEnabled: true
+        )
+        scanner.delegate = context.coordinator
+        try? scanner.startScanning()
+        return scanner
+    }
+
+    func updateUIViewController(_ uiViewController: DataScannerViewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onScan: onScan)
+    }
+
+    final class Coordinator: NSObject, DataScannerViewControllerDelegate {
+        var onScan: (String) -> Void
+        private var hasScanned = false
+
+        init(onScan: @escaping (String) -> Void) {
+            self.onScan = onScan
+        }
+
+        func dataScanner(_ dataScanner: DataScannerViewController, didAdd addedItems: [RecognizedItem], allItems: [RecognizedItem]) {
+            guard !hasScanned else { return }
+            if let item = addedItems.first, case .barcode(let barcode) = item, let payload = barcode.payloadStringValue {
+                hasScanned = true
+                dataScanner.stopScanning()
+                onScan(payload)
+            }
+        }
+    }
+}
+
 #else
 @main
 struct iPhoneApp {
@@ -244,45 +466,63 @@ final class PlanningCenteredStore {
 }
 
 extension PlanningCenteredStore {
-    static let localDemoAPI = PlanningCenteredStore {
-        let baseURL = URL(string: "https://127.0.0.1:5577")!
-        let client = HTTPForegroundStateClient(baseURL: baseURL)
-        return try await ForegroundStateLoader(client: client).load()
-    } attachPlanningArtifact: { request in
-        let baseURL = URL(string: "https://127.0.0.1:5577")!
-        let client = HTTPForegroundStateClient(baseURL: baseURL)
-        let response = try await client.attachPlanningArtifact(request)
-        return try PlanningStateMapper().map(response.foregroundState)
-    } startWrappedSession: {
-        let baseURL = URL(string: "https://127.0.0.1:5577")!
-        let client = HTTPForegroundStateClient(baseURL: baseURL)
-        let response = try await client.startWrappedSession()
-        return try PlanningStateMapper().map(response.foregroundState)
-    } stopWrappedSession: { request in
-        let baseURL = URL(string: "https://127.0.0.1:5577")!
-        let client = HTTPForegroundStateClient(baseURL: baseURL)
-        let response = try await client.stopWrappedSession(request)
-        return try PlanningStateMapper().map(response.foregroundState)
-    } submitPendingInputReply: { request in
-        let baseURL = URL(string: "https://127.0.0.1:5577")!
-        let client = HTTPForegroundStateClient(baseURL: baseURL)
-        let response = try await client.submitPendingInputReply(request)
-        return try PlanningStateMapper().map(response.foregroundState)
-    } submitApprovalDecision: { request in
-        let baseURL = URL(string: "https://127.0.0.1:5577")!
-        let client = HTTPForegroundStateClient(baseURL: baseURL)
-        let response = try await client.submitApprovalDecision(request)
-        return try PlanningStateMapper().map(response.foregroundState)
-    } prepareDraftComment: { request in
-        let baseURL = URL(string: "https://127.0.0.1:5577")!
-        let client = HTTPForegroundStateClient(baseURL: baseURL)
-        let response = try await client.prepareDraftComment(request)
-        return try PlanningStateMapper().map(response.foregroundState)
-    } submitDraftCommentDecision: { request in
-        let baseURL = URL(string: "https://127.0.0.1:5577")!
-        let client = HTTPForegroundStateClient(baseURL: baseURL)
-        let response = try await client.submitDraftCommentDecision(request)
-        return try PlanningStateMapper().map(response.foregroundState)
+    /// Builds a store wired to the paired Mac Agent.
+    /// Uses Bonjour to resolve the current LAN IP at each request, falling back to the stored URL.
+    /// When a cert fingerprint is stored, pins the TLS connection to that specific certificate.
+    static func pairedAPI(credentials: PairedControlCredentials) -> PlanningCenteredStore {
+        func resolvedClient() async throws -> HTTPForegroundStateClient {
+            // Resolve via Bonjour if we have a service name; fall back to stored URL.
+            let baseURL: URL
+            if let name = credentials.bonjourServiceName,
+               let resolved = try? await BonjourResolver.resolve(serviceName: name) {
+                baseURL = resolved
+            } else {
+                baseURL = credentials.controlBaseURL
+            }
+
+            // Build a cert-pinning URLSession when we have a stored fingerprint.
+            let session: URLSession
+            if let fp = credentials.certFingerprintSHA256 {
+                session = pinnedURLSession(certFingerprintSHA256: fp)
+            } else {
+                session = .shared
+            }
+
+            return HTTPForegroundStateClient(baseURL: baseURL, credentials: credentials, session: session)
+        }
+
+        return PlanningCenteredStore {
+            let client = try await resolvedClient()
+            return try await ForegroundStateLoader(client: client).load()
+        } attachPlanningArtifact: { request in
+            let client = try await resolvedClient()
+            let response = try await client.attachPlanningArtifact(request)
+            return try PlanningStateMapper().map(response.foregroundState)
+        } startWrappedSession: {
+            let client = try await resolvedClient()
+            let response = try await client.startWrappedSession()
+            return try PlanningStateMapper().map(response.foregroundState)
+        } stopWrappedSession: { request in
+            let client = try await resolvedClient()
+            let response = try await client.stopWrappedSession(request)
+            return try PlanningStateMapper().map(response.foregroundState)
+        } submitPendingInputReply: { request in
+            let client = try await resolvedClient()
+            let response = try await client.submitPendingInputReply(request)
+            return try PlanningStateMapper().map(response.foregroundState)
+        } submitApprovalDecision: { request in
+            let client = try await resolvedClient()
+            let response = try await client.submitApprovalDecision(request)
+            return try PlanningStateMapper().map(response.foregroundState)
+        } prepareDraftComment: { request in
+            let client = try await resolvedClient()
+            let response = try await client.prepareDraftComment(request)
+            return try PlanningStateMapper().map(response.foregroundState)
+        } submitDraftCommentDecision: { request in
+            let client = try await resolvedClient()
+            let response = try await client.submitDraftCommentDecision(request)
+            return try PlanningStateMapper().map(response.foregroundState)
+        }
     }
 }
 

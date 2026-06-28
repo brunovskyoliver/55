@@ -1,4 +1,5 @@
 import AgentShared
+import CryptoKit
 import Foundation
 
 public protocol ForegroundStateClient: Sendable {
@@ -258,6 +259,57 @@ public enum ForegroundStateClientError: Error, Equatable {
     case pairedTLSRequired
     case unexpectedStatusCode(Int)
     case requestFailed(statusCode: Int, message: String)
+}
+
+// MARK: - Cert-Pinning URLSession
+
+/// Returns a `URLSession` that pins the server TLS certificate by SHA-256 fingerprint.
+/// Pass this session to `HTTPForegroundStateClient` when connecting to the Mac Agent over LAN.
+public func pinnedURLSession(certFingerprintSHA256: String) -> URLSession {
+    let delegate = PinningURLSessionDelegate(expectedFingerprint: certFingerprintSHA256)
+    return URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+}
+
+/// `URLSessionDelegate` that validates the server leaf-cert fingerprint against a stored SHA-256.
+/// Bypasses hostname validation so the client can connect to a raw LAN IP (not the cert CN).
+final class PinningURLSessionDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
+    private let expectedFingerprint: String
+
+    init(expectedFingerprint: String) {
+        self.expectedFingerprint = expectedFingerprint
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let serverTrust = challenge.protectionSpace.serverTrust
+        else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+
+        // Retrieve the leaf certificate using the iOS 15+ API.
+        guard let chain = SecTrustCopyCertificateChain(serverTrust) as? [SecCertificate],
+              let leaf = chain.first
+        else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+
+        let derData = SecCertificateCopyData(leaf) as Data
+        let fingerprint = SHA256.hash(data: derData)
+            .map { String(format: "%02x", $0) }
+            .joined()
+
+        if fingerprint == expectedFingerprint {
+            completionHandler(.useCredential, URLCredential(trust: serverTrust))
+        } else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+        }
+    }
 }
 
 public struct ForegroundStateLoader: Sendable {

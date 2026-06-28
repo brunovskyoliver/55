@@ -46,7 +46,7 @@ final class DemoControlServiceTests: XCTestCase {
         )
         let baseURL: URL
         do {
-            baseURL = try server.start()
+            baseURL = try server.start().url
         } catch LocalControlAPIServerError.bindFailed {
             throw XCTSkip("The execution sandbox denied binding a local socket.")
         }

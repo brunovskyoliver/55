@@ -6,19 +6,28 @@ public struct PairingInvitation: Codable, Equatable, Identifiable, Sendable {
     public var controlBaseURL: URL
     public var expiresAt: Date
     public var invitationSecret: String
+    /// SHA-256 fingerprint (lowercase hex) of the server's self-signed TLS certificate.
+    /// Used by the iPhone to pin the connection rather than trusting the system CA store.
+    public var certFingerprintSHA256: String?
+    /// Bonjour service name (`_agentctl._tcp`) for re-resolving the Mac's current LAN IP.
+    public var bonjourServiceName: String?
 
     public init(
         id: String,
         macAgentName: String,
         controlBaseURL: URL,
         expiresAt: Date,
-        invitationSecret: String
+        invitationSecret: String,
+        certFingerprintSHA256: String? = nil,
+        bonjourServiceName: String? = nil
     ) {
         self.id = id
         self.macAgentName = macAgentName
         self.controlBaseURL = controlBaseURL
         self.expiresAt = expiresAt
         self.invitationSecret = invitationSecret
+        self.certFingerprintSHA256 = certFingerprintSHA256
+        self.bonjourServiceName = bonjourServiceName
     }
 
     public func encodedQRPayload() throws -> String {
@@ -67,11 +76,23 @@ public struct PairedControlCredentials: Codable, Equatable, Sendable {
     public var deviceID: String
     public var bearerToken: String
     public var controlBaseURL: URL
+    /// SHA-256 fingerprint (lowercase hex) of the server TLS certificate for cert pinning.
+    public var certFingerprintSHA256: String?
+    /// Bonjour service name for re-resolving the Mac's current LAN IP at connect time.
+    public var bonjourServiceName: String?
 
-    public init(deviceID: String, bearerToken: String, controlBaseURL: URL) {
+    public init(
+        deviceID: String,
+        bearerToken: String,
+        controlBaseURL: URL,
+        certFingerprintSHA256: String? = nil,
+        bonjourServiceName: String? = nil
+    ) {
         self.deviceID = deviceID
         self.bearerToken = bearerToken
         self.controlBaseURL = controlBaseURL
+        self.certFingerprintSHA256 = certFingerprintSHA256
+        self.bonjourServiceName = bonjourServiceName
     }
 
     public var authorizationHeaderValue: String {

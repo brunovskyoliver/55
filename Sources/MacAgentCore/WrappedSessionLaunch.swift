@@ -205,6 +205,80 @@ public struct TmuxClaudeLauncher: TmuxLaunching {
     }
 }
 
+// MARK: - Ghostty Integration
+
+public protocol GhosttyLaunching: Sendable {
+    /// Opens or focuses Ghostty on the given tmux session. Non-fatal — failure should
+    /// never block a Wrapped Session launch. Returns nil on success, an error message on failure.
+    func openOrFocus(attachCommand: String, sessionName: String) -> String?
+}
+
+/// Opens or focuses Ghostty on the given tmux session.
+/// - If Ghostty is already running: activates it and sends the attach command via AppleScript
+///   keystroke (requires Accessibility permission for `System Events`).
+/// - If Ghostty is not running: launches it with `open -na Ghostty.app` and passes the command
+///   via the `-e` flag so it opens directly in the right session.
+public struct GhosttyLauncher: GhosttyLaunching {
+    private let executor: any ProcessCommandExecuting
+
+    public init(executor: any ProcessCommandExecuting = FoundationProcessCommandExecutor()) {
+        self.executor = executor
+    }
+
+    public func openOrFocus(attachCommand: String, sessionName: String) -> String? {
+        if ghosttyIsRunning {
+            return activateAndSendCommand(attachCommand)
+        } else {
+            return launchFresh(attachCommand: attachCommand)
+        }
+    }
+
+    // MARK: Private
+
+    private var ghosttyIsRunning: Bool {
+        (try? executor.run(executable: "pgrep", arguments: ["-x", "Ghostty"])) != nil
+    }
+
+    private func activateAndSendCommand(_ command: String) -> String? {
+        // Escape single quotes in the command for AppleScript string literal.
+        let escaped = command.replacingOccurrences(of: "\"", with: "\\\"")
+        let script = """
+        tell application "Ghostty" to activate
+        delay 0.25
+        tell application "System Events"
+            keystroke "\(escaped)"
+            key code 36
+        end tell
+        """
+        do {
+            _ = try executor.run(executable: "osascript", arguments: ["-e", script])
+            return nil
+        } catch let error as ProcessCommandFailure {
+            // Likely denied Accessibility permission.
+            if error.stderr.contains("not allowed") || error.stderr.contains("Assistive") {
+                return "Ghostty focus requires Accessibility permission in System Settings > Privacy."
+            }
+            return "AppleScript failed: \(error.stderr.trimmingCharacters(in: .whitespacesAndNewlines))"
+        } catch {
+            return "AppleScript error: \(error)"
+        }
+    }
+
+    private func launchFresh(attachCommand: String) -> String? {
+        // Build open -na Ghostty.app --args -e tmux attach-session -t <session>
+        let parts = attachCommand.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        let args = ["-na", "Ghostty.app", "--args", "-e"] + parts
+        do {
+            _ = try executor.run(executable: "open", arguments: args)
+            return nil
+        } catch let error as ProcessCommandFailure {
+            return "Ghostty launch failed: \(error.stderr.trimmingCharacters(in: .whitespacesAndNewlines))"
+        } catch {
+            return "Ghostty launch error: \(error)"
+        }
+    }
+}
+
 public struct FoundationProcessCommandExecutor: ProcessCommandExecuting {
     public init() {}
 

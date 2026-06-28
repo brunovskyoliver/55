@@ -2,6 +2,7 @@
 import AgentShared
 import Darwin
 import Foundation
+import Network
 
 public enum LocalControlAPIServerError: Error, Equatable {
     case socketCreationFailed
@@ -9,6 +10,7 @@ public enum LocalControlAPIServerError: Error, Equatable {
     case bindFailed
     case listenFailed
     case portLookupFailed
+    case tlsIdentityUnavailable
 }
 
 public struct LocalControlAPIHTTPResponse: Equatable, Sendable {
@@ -665,17 +667,18 @@ public final class LocalControlAPIServer: @unchecked Sendable {
     private let responder: LocalControlAPIResponder
     private let requestedPort: UInt16
     private let channelSecurity: ControlAPIChannelSecurity
+    /// Bonjour service name advertised on `_agentctl._tcp`. Usually the Mac Agent display name.
+    private let bonjourServiceName: String
     private let lock = NSLock()
-    private var socketFileDescriptor: Int32 = -1
-    private var isStopping = false
-    private var serverThread: Thread?
+    private var nwListener: NWListener?
 
     public init(
         provider: any ControlAPIProviding,
         pairingService: MacPairingService? = nil,
         securityPolicy: ControlAPISecurityPolicy,
         channelSecurity: ControlAPIChannelSecurity = .plainHTTP,
-        port: UInt16 = 5577
+        port: UInt16 = 5577,
+        bonjourServiceName: String = "MacAgent"
     ) {
         self.responder = LocalControlAPIResponder(
             provider: provider,
@@ -684,152 +687,155 @@ public final class LocalControlAPIServer: @unchecked Sendable {
         )
         self.requestedPort = port
         self.channelSecurity = channelSecurity
+        self.bonjourServiceName = bonjourServiceName
     }
 
     deinit {
         stop()
     }
 
-    public func start() throws -> URL {
-        let fileDescriptor = socket(AF_INET, SOCK_STREAM, 0)
-        guard fileDescriptor >= 0 else {
-            throw LocalControlAPIServerError.socketCreationFailed
+    /// Starts the server and returns the base URL (using the primary LAN IP when available).
+    /// Also returns the cert fingerprint when TLS is active.
+    public func start() throws -> (url: URL, certFingerprintSHA256: String?) {
+        let tlsIdentity: SelfSignedTLSIdentity?
+
+        if channelSecurity == .pairedTLS {
+            tlsIdentity = try SelfSignedTLSIdentity.loadOrCreate()
+        } else {
+            tlsIdentity = nil
         }
 
-        var reuseAddress: Int32 = 1
-        let optionResult = setsockopt(
-            fileDescriptor,
-            SOL_SOCKET,
-            SO_REUSEADDR,
-            &reuseAddress,
-            socklen_t(MemoryLayout<Int32>.size)
-        )
-        guard optionResult == 0 else {
-            close(fileDescriptor)
-            throw LocalControlAPIServerError.socketOptionFailed
+        let parameters: NWParameters
+        if let tls = tlsIdentity {
+            let tlsOptions = NWProtocolTLS.Options()
+            guard let secIdentity = sec_identity_create(tls.identity) else {
+                throw LocalControlAPIServerError.tlsIdentityUnavailable
+            }
+            sec_protocol_options_set_local_identity(
+                tlsOptions.securityProtocolOptions,
+                secIdentity
+            )
+            // Don't request a client cert; auth is via bearer token.
+            sec_protocol_options_set_peer_authentication_required(
+                tlsOptions.securityProtocolOptions,
+                false
+            )
+            parameters = NWParameters(tls: tlsOptions)
+        } else {
+            parameters = NWParameters.tcp
         }
 
-        var address = sockaddr_in()
-        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_port = requestedPort.bigEndian
-        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        let nwPort = NWEndpoint.Port(rawValue: requestedPort) ?? .any
+        let listener = try NWListener(using: parameters, on: nwPort)
 
-        let bindResult = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { reboundPointer in
-                Darwin.bind(fileDescriptor, reboundPointer, socklen_t(MemoryLayout<sockaddr_in>.size))
+        // Advertise on LAN via Bonjour so the iPhone can discover without knowing the IP.
+        listener.service = NWListener.Service(name: bonjourServiceName, type: "_agentctl._tcp")
+
+        let readySemaphore = DispatchSemaphore(value: 0)
+        // Wrapped in a class so the closure can mutate it across concurrency boundaries.
+        final class ErrorBox: @unchecked Sendable { var value: Error? }
+        let errorBox = ErrorBox()
+
+        listener.stateUpdateHandler = { state in
+            switch state {
+            case .ready, .waiting:
+                readySemaphore.signal()
+            case .failed(let error):
+                errorBox.value = error
+                readySemaphore.signal()
+            default:
+                break
             }
         }
-        guard bindResult == 0 else {
-            close(fileDescriptor)
-            throw LocalControlAPIServerError.bindFailed
+
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self else { return }
+            connection.start(queue: .global(qos: .userInitiated))
+            self.handleNWConnection(connection)
         }
 
-        guard listen(fileDescriptor, SOMAXCONN) == 0 else {
-            close(fileDescriptor)
-            throw LocalControlAPIServerError.listenFailed
+        listener.start(queue: .global(qos: .userInitiated))
+        readySemaphore.wait()
+
+        if let error = errorBox.value {
+            listener.cancel()
+            throw error
         }
 
-        let port = try boundPort(for: fileDescriptor)
-        lock.withLock {
-            socketFileDescriptor = fileDescriptor
-            isStopping = false
-        }
+        lock.withLock { self.nwListener = listener }
 
-        let thread = Thread { [weak self] in
-            self?.serveRequests(from: fileDescriptor)
-        }
-        thread.name = "LocalControlAPIServer"
-        serverThread = thread
-        thread.start()
-
+        let port = listener.port?.rawValue ?? requestedPort
+        let host = primaryLANIPv4() ?? "127.0.0.1"
         let scheme = channelSecurity == .pairedTLS ? "https" : "http"
-        return URL(string: "\(scheme)://127.0.0.1:\(port)")!
+        let url = URL(string: "\(scheme)://\(host):\(port)")!
+        return (url, tlsIdentity?.certFingerprintSHA256)
     }
 
     public func stop() {
-        let fileDescriptor = lock.withLock {
-            isStopping = true
-            let current = socketFileDescriptor
-            socketFileDescriptor = -1
-            return current
-        }
-
-        if fileDescriptor >= 0 {
-            shutdown(fileDescriptor, SHUT_RDWR)
-            close(fileDescriptor)
+        lock.withLock {
+            nwListener?.cancel()
+            nwListener = nil
         }
     }
 
-    private func serveRequests(from fileDescriptor: Int32) {
-        while shouldContinueServing {
-            var clientAddress = sockaddr()
-            var clientAddressLength = socklen_t(MemoryLayout<sockaddr>.size)
-            let client = accept(fileDescriptor, &clientAddress, &clientAddressLength)
+    // MARK: - Connection handling
 
-            guard client >= 0 else {
-                continue
-            }
-
-            handleConnection(client)
-            close(client)
-        }
-    }
-
-    private var shouldContinueServing: Bool {
-        lock.withLock { !isStopping }
-    }
-
-    private func handleConnection(_ fileDescriptor: Int32) {
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        let byteCount = read(fileDescriptor, &buffer, buffer.count)
-        guard byteCount > 0 else {
-            return
-        }
-
-        let response = responder.response(
-            for: String(decoding: buffer.prefix(byteCount), as: UTF8.self),
-            channelSecurity: channelSecurity
-        )
-        writeResponse(response, to: fileDescriptor)
-    }
-
-    private func writeResponse(_ httpResponse: LocalControlAPIHTTPResponse, to fileDescriptor: Int32) {
-        let header = """
-        HTTP/1.1 \(httpResponse.status)\r
-        Content-Type: \(httpResponse.contentType)\r
-        Content-Length: \(httpResponse.body.count)\r
-        Connection: close\r
-        \r
-
-        """
-
-        var response = Data(header.utf8)
-        response.append(httpResponse.body)
-        response.withUnsafeBytes { rawBuffer in
-            guard let baseAddress = rawBuffer.baseAddress else {
+    private func handleNWConnection(_ connection: NWConnection) {
+        // Read the full HTTP request in one receive (matches existing 4096-byte approach,
+        // but with a larger limit to accommodate bigger request bodies).
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, _, _ in
+            guard let self, let data, !data.isEmpty else {
+                connection.cancel()
                 return
             }
 
-            _ = Darwin.write(fileDescriptor, baseAddress, response.count)
+            let rawRequest = String(decoding: data, as: UTF8.self)
+            let response = self.responder.response(for: rawRequest, channelSecurity: self.channelSecurity)
+            let responseData = self.serialiseHTTPResponse(response)
+
+            connection.send(content: responseData, completion: .contentProcessed { _ in
+                connection.cancel()
+            })
         }
     }
 
-    private func boundPort(for fileDescriptor: Int32) throws -> UInt16 {
-        var address = sockaddr_in()
-        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+    private func serialiseHTTPResponse(_ response: LocalControlAPIHTTPResponse) -> Data {
+        let header = "HTTP/1.1 \(response.status)\r\nContent-Type: \(response.contentType)\r\nContent-Length: \(response.body.count)\r\nConnection: close\r\n\r\n"
+        var data = Data(header.utf8)
+        data.append(response.body)
+        return data
+    }
 
-        let result = withUnsafeMutablePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { reboundPointer in
-                getsockname(fileDescriptor, reboundPointer, &length)
+    // MARK: - LAN IP discovery
+
+    /// Returns the primary non-loopback IPv4 address for use in the invitation URL.
+    private func primaryLANIPv4() -> String? {
+        var addrs: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&addrs) == 0 else { return nil }
+        defer { freeifaddrs(addrs) }
+
+        var ptr = addrs
+        while let a = ptr {
+            let flags = Int32(a.pointee.ifa_flags)
+            let family = Int32(a.pointee.ifa_addr?.pointee.sa_family ?? 0)
+
+            let isIPv4 = family == AF_INET
+            let isUp = (flags & IFF_UP) != 0
+            let isRunning = (flags & IFF_RUNNING) != 0
+            let isLoopback = (flags & IFF_LOOPBACK) != 0
+
+            if isIPv4 && isUp && isRunning && !isLoopback, let sa = a.pointee.ifa_addr {
+                var buf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                let len = socklen_t(sa.pointee.sa_len)
+                if getnameinfo(sa, len, &buf, socklen_t(buf.count), nil, 0, NI_NUMERICHOST) == 0 {
+                    return buf.withUnsafeBufferPointer { ptr in
+                        ptr.baseAddress.map { String(cString: $0) }
+                    }
+                }
             }
+            ptr = a.pointee.ifa_next
         }
-
-        guard result == 0 else {
-            throw LocalControlAPIServerError.portLookupFailed
-        }
-
-        return UInt16(bigEndian: address.sin_port)
+        return nil
     }
 }
 
