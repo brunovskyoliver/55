@@ -5,6 +5,17 @@ options:
     iOS: "17.0"
   createIntermediateGroups: true
   xcodeVersion: "15"
+  # xcodegen omits the package back-reference for local packages; patch it after generation.
+  postGenCommand: >
+    python3 -c "
+    import pathlib, sys
+    p = pathlib.Path('AgentControl.xcodeproj/project.pbxproj')
+    t = p.read_text()
+    old = 'isa = XCSwiftPackageProductDependency;\n\t\t\tproductName = iPhoneApp;'
+    new = 'isa = XCSwiftPackageProductDependency;\n\t\t\tpackage = C37907D93885161518BE9B0A /* XCLocalSwiftPackageReference \"..\" */;\n\t\t\tproductName = iPhoneApp;'
+    if old in t: p.write_text(t.replace(old, new)); print('patched pbxproj')
+    else: print('already patched or pattern changed')
+    "
 
 packages:
   AgentSessionControl:
