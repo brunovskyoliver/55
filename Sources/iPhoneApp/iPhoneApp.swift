@@ -58,8 +58,11 @@ private func storeCredentials(_ credentials: PairedControlCredentials) {
 }
 
 private func clearStoredCredentials() {
+    if let deviceID = UserDefaults.standard.string(forKey: "AgentSessionControl.pairedDeviceID") {
+        let store = KeychainPairedControlCredentialStore()
+        try? store.delete(deviceID: deviceID)
+    }
     UserDefaults.standard.removeObject(forKey: "AgentSessionControl.pairedDeviceID")
-    // Credentials remain in Keychain (no delete API on the existing store); they'll just be unused.
 }
 
 // MARK: - Pairing Screen
@@ -260,6 +263,7 @@ final class PlanningCenteredStore {
     var isSubmittingApprovalDecision = false
     var isPreparingDraftComment = false
     var isSubmittingDraftCommentDecision = false
+    var isDisconnecting = false
     var replyText = ""
     var draftCommentBody = ""
     var isConfirmingUncertainReply = false
@@ -275,6 +279,7 @@ final class PlanningCenteredStore {
     private let submitApprovalDecision: @Sendable (SubmitApprovalDecisionRequest) async throws -> PlanningCenteredState
     private let prepareDraftComment: @Sendable (PrepareDraftCommentRequest) async throws -> PlanningCenteredState
     private let submitDraftCommentDecision: @Sendable (SubmitDraftCommentDecisionRequest) async throws -> PlanningCenteredState
+    private let disconnectPairing: @Sendable () async throws -> Void
 
     init(
         loadState: @escaping @Sendable () async throws -> PlanningCenteredState,
@@ -284,7 +289,8 @@ final class PlanningCenteredStore {
         submitPendingInputReply: @escaping @Sendable (SubmitPendingInputReplyRequest) async throws -> PlanningCenteredState,
         submitApprovalDecision: @escaping @Sendable (SubmitApprovalDecisionRequest) async throws -> PlanningCenteredState,
         prepareDraftComment: @escaping @Sendable (PrepareDraftCommentRequest) async throws -> PlanningCenteredState,
-        submitDraftCommentDecision: @escaping @Sendable (SubmitDraftCommentDecisionRequest) async throws -> PlanningCenteredState
+        submitDraftCommentDecision: @escaping @Sendable (SubmitDraftCommentDecisionRequest) async throws -> PlanningCenteredState,
+        disconnectPairing: @escaping @Sendable () async throws -> Void
     ) {
         self.loadState = loadState
         self.attachPlanningArtifact = attachPlanningArtifact
@@ -294,6 +300,7 @@ final class PlanningCenteredStore {
         self.submitApprovalDecision = submitApprovalDecision
         self.prepareDraftComment = prepareDraftComment
         self.submitDraftCommentDecision = submitDraftCommentDecision
+        self.disconnectPairing = disconnectPairing
     }
 
     func foregroundSync() async {
@@ -457,6 +464,19 @@ final class PlanningCenteredStore {
         }
     }
 
+    func disconnect() async throws {
+        isDisconnecting = true
+        defer { isDisconnecting = false }
+
+        do {
+            try await disconnectPairing()
+            errorText = nil
+        } catch {
+            errorText = "Disconnect failed: \(error)"
+            throw error
+        }
+    }
+
     private func updateState(_ nextState: PlanningCenteredState) {
         state = nextState
         if let draftComment = nextState.draftComment {
@@ -525,6 +545,10 @@ extension PlanningCenteredStore {
             let client = try await resolvedClient()
             let response = try await client.submitDraftCommentDecision(request)
             return try PlanningStateMapper().map(response.foregroundState)
+        } disconnectPairing: {
+            let client = try await resolvedClient()
+            try await client.revokePairing()
+            clearStoredCredentials()
         }
     }
 }

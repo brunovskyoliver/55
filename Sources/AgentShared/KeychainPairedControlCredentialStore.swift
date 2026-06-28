@@ -49,6 +49,13 @@ public final class KeychainPairedControlCredentialStore: PairedControlCredential
         return try decoder.decode(PairedControlCredentials.self, from: data)
     }
 
+    public func delete(deviceID: String) throws {
+        let status = SecItemDelete(baseQuery(deviceID: deviceID) as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw KeychainPairedControlCredentialStoreError.unhandledStatus(status)
+        }
+    }
+
     private func baseQuery(deviceID: String) -> [String: Any] {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,

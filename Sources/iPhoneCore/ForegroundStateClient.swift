@@ -31,6 +31,10 @@ public protocol DraftCommentClient: Sendable {
     func submitDraftCommentDecision(_ request: SubmitDraftCommentDecisionRequest) async throws -> SubmitDraftCommentDecisionResponse
 }
 
+public protocol PairingRevokeClient: Sendable {
+    func revokePairing() async throws
+}
+
 public struct HTTPForegroundStateClient: ForegroundStateClient {
     private let baseURL: URL
     private let credentials: PairedControlCredentials?
@@ -252,6 +256,28 @@ extension HTTPForegroundStateClient: DraftCommentClient {
         }
 
         return try decoder.decode(SubmitDraftCommentDecisionResponse.self, from: data)
+    }
+}
+
+extension HTTPForegroundStateClient: PairingRevokeClient {
+    public func revokePairing() async throws {
+        guard baseURL.scheme == "https" else {
+            throw ForegroundStateClientError.pairedTLSRequired
+        }
+
+        var urlRequest = authorizedRequest(url: baseURL.appending(path: "v1/pairings/revoke"))
+        urlRequest.httpMethod = "POST"
+
+        let (data, response) = try await session.data(for: urlRequest)
+
+        if let httpResponse = response as? HTTPURLResponse,
+           !(200..<300).contains(httpResponse.statusCode) {
+            let errorResponse = try? decoder.decode(ControlAPIErrorResponse.self, from: data)
+            throw ForegroundStateClientError.requestFailed(
+                statusCode: httpResponse.statusCode,
+                message: errorResponse?.message ?? "Pairing revoke failed."
+            )
+        }
     }
 }
 

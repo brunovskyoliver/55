@@ -28,7 +28,7 @@ public struct PairedControlAPIAuthorizer: Sendable {
 
         do {
             guard let material = try secretStore.material(forDeviceID: deviceID) else {
-                return .invalidIdentity
+                return .unknownDevice(deviceID: deviceID)
             }
 
             guard material.bearerToken == bearerToken else {
@@ -44,6 +44,7 @@ public struct PairedControlAPIAuthorizer: Sendable {
 
 public enum PairedControlAPIAuthorizationResult: Equatable, Sendable {
     case authorized(deviceID: String)
+    case unknownDevice(deviceID: String)
     case requiresTLS
     case missingIdentity
     case invalidIdentity

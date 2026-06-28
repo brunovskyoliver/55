@@ -53,6 +53,38 @@ final class OwnerDevicePairingTests: XCTestCase {
             XCTAssertEqual(error as? ForegroundStateClientError, .pairedTLSRequired)
         }
     }
+
+    func testHTTPForegroundStateClientRevokePostsAuthorizedRequest() async throws {
+        let credentials = PairedControlCredentials(
+            deviceID: "owner-device-id",
+            bearerToken: "owner-bearer-token",
+            controlBaseURL: URL(string: "https://127.0.0.1:5577")!
+        )
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [CapturingURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        CapturingURLProtocol.response = HTTPURLResponse(
+            url: credentials.controlBaseURL.appending(path: "v1/pairings/revoke"),
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: nil
+        )
+        CapturingURLProtocol.responseData = Data("{}".utf8)
+        CapturingURLProtocol.capturedRequest = nil
+        let client = HTTPForegroundStateClient(
+            baseURL: credentials.controlBaseURL,
+            credentials: credentials,
+            session: session
+        )
+
+        try await client.revokePairing()
+
+        let request = try XCTUnwrap(CapturingURLProtocol.capturedRequest)
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.url?.path, "/v1/pairings/revoke")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "X-Owner-Device-ID"), "owner-device-id")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer owner-bearer-token")
+    }
 }
 
 private final class FakePairingCompletionClient: PairingCompletionClient, @unchecked Sendable {
@@ -105,6 +137,57 @@ private final class InMemoryPairedControlCredentialStore: PairedControlCredentia
             credentialsByDeviceID[deviceID]
         }
     }
+
+    func delete(deviceID: String) throws {
+        _ = lock.withLock {
+            credentialsByDeviceID.removeValue(forKey: deviceID)
+        }
+    }
+}
+
+private final class CapturingURLProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var _capturedRequest: URLRequest?
+    nonisolated(unsafe) private static var _response: HTTPURLResponse?
+    nonisolated(unsafe) private static var _responseData = Data()
+
+    static var capturedRequest: URLRequest? {
+        get { lock.withLock { _capturedRequest } }
+        set { lock.withLock { _capturedRequest = newValue } }
+    }
+
+    static var response: HTTPURLResponse? {
+        get { lock.withLock { _response } }
+        set { lock.withLock { _response = newValue } }
+    }
+
+    static var responseData: Data {
+        get { lock.withLock { _responseData } }
+        set { lock.withLock { _responseData = newValue } }
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.capturedRequest = request
+        let response = Self.response ?? HTTPURLResponse(
+            url: request.url!,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: nil
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Self.responseData)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
 }
 
 private extension NSLock {

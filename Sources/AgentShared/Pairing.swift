@@ -125,9 +125,11 @@ public struct PairingSecretMaterial: Codable, Equatable, Sendable {
 public protocol PairingSecretMaterialStore: Sendable {
     func store(_ material: PairingSecretMaterial) throws
     func material(forDeviceID deviceID: String) throws -> PairingSecretMaterial?
+    func delete(deviceID: String) throws
 }
 
 public protocol PairedControlCredentialStore: Sendable {
     func store(_ credentials: PairedControlCredentials) throws
     func credentials(forDeviceID deviceID: String) throws -> PairedControlCredentials?
+    func delete(deviceID: String) throws
 }

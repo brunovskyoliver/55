@@ -453,6 +453,12 @@ private final class WorkflowPairingSecretStore: PairingSecretMaterialStore, @unc
             materialByDeviceID[deviceID]
         }
     }
+
+    func delete(deviceID: String) throws {
+        _ = lock.withLock {
+            materialByDeviceID.removeValue(forKey: deviceID)
+        }
+    }
 }
 
 private struct WorkflowPairingClock: PairingClock {

@@ -149,6 +149,23 @@ public struct LocalControlAPIResponder: Sendable {
             return pairingCompletionResponse(body: request.body)
         }
 
+        if request.method == "POST", request.path == LocalControlAPIServer.pairingRevokePath {
+            let authorization = securityPolicy.authorize(request: request, channelSecurity: channelSecurity)
+            switch authorization {
+            case .authorized(let deviceID):
+                return pairingRevokeResponse(deviceID: deviceID)
+            case .unknownDevice:
+                return jsonErrorResponse(
+                    status: "404 Not Found",
+                    statusCode: 404,
+                    errorCode: "pairing_device_not_found",
+                    message: "The paired device is not recognised."
+                )
+            default:
+                return authorizationFailureResponse(authorization)
+            }
+        }
+
         return LocalControlAPIHTTPResponse(
             status: "404 Not Found",
             statusCode: 404,
@@ -450,6 +467,41 @@ public struct LocalControlAPIResponder: Sendable {
         }
     }
 
+    private func pairingRevokeResponse(deviceID: String) -> LocalControlAPIHTTPResponse {
+        guard let pairingService else {
+            return jsonErrorResponse(
+                status: "503 Service Unavailable",
+                statusCode: 503,
+                errorCode: "pairing_unavailable",
+                message: "Pairing is unavailable on this Mac Agent."
+            )
+        }
+
+        do {
+            try pairingService.revoke(deviceID: deviceID)
+            return LocalControlAPIHTTPResponse(
+                status: "200 OK",
+                statusCode: 200,
+                contentType: "application/json",
+                body: Data("{}".utf8)
+            )
+        } catch MacPairingServiceError.unknownDevice {
+            return jsonErrorResponse(
+                status: "404 Not Found",
+                statusCode: 404,
+                errorCode: "pairing_device_not_found",
+                message: "The paired device is not recognised."
+            )
+        } catch {
+            return jsonErrorResponse(
+                status: "500 Internal Server Error",
+                statusCode: 500,
+                errorCode: "pairing_revoke_failed",
+                message: "The pairing could not be revoked."
+            )
+        }
+    }
+
     private func foregroundStateResponse() -> LocalControlAPIHTTPResponse {
         do {
             return LocalControlAPIHTTPResponse(
@@ -476,6 +528,13 @@ public struct LocalControlAPIResponder: Sendable {
                 statusCode: 500,
                 errorCode: "authorization_state_invalid",
                 message: "Authorization reached an invalid state."
+            )
+        case .unknownDevice:
+            return jsonErrorResponse(
+                status: "401 Unauthorized",
+                statusCode: 401,
+                errorCode: "paired_identity_unknown",
+                message: "Paired owner device credentials are not recognised."
             )
         case .requiresTLS:
             return jsonErrorResponse(
@@ -656,6 +715,7 @@ public struct LocalControlAPIResponder: Sendable {
 public final class LocalControlAPIServer: @unchecked Sendable {
     public static let foregroundStatePath = "/v1/foreground-state"
     public static let pairingCompletionPath = "/v1/pairings/complete"
+    public static let pairingRevokePath = "/v1/pairings/revoke"
     public static let planningArtifactAttachmentPath = "/v1/planning-artifact/attachment"
     public static let wrappedSessionStartPath = "/v1/agent-session/start"
     public static let wrappedSessionStopPath = "/v1/agent-session/stop"

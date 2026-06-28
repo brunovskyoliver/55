@@ -51,6 +51,13 @@ public final class KeychainPairingSecretStore: PairingSecretMaterialStore, @unch
         return try decoder.decode(PairingSecretMaterial.self, from: data)
     }
 
+    public func delete(deviceID: String) throws {
+        let status = SecItemDelete(baseQuery(deviceID: deviceID) as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw KeychainPairingSecretStoreError.unhandledStatus(status)
+        }
+    }
+
     private func baseQuery(deviceID: String) -> [String: Any] {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,

@@ -110,6 +110,14 @@ public final class MacPairingService: @unchecked Sendable {
         )
     }
 
+    public func revoke(deviceID: String) throws {
+        guard try secretStore.material(forDeviceID: deviceID) != nil else {
+            throw MacPairingServiceError.unknownDevice
+        }
+
+        try secretStore.delete(deviceID: deviceID)
+    }
+
     private func consumeInvitation(id: PairingInvitation.ID) throws -> PairingInvitation {
         try lock.withLock {
             guard let invitation = invitations.removeValue(forKey: id) else {
@@ -125,6 +133,7 @@ public enum MacPairingServiceError: Error, Equatable {
     case unknownInvitation
     case invitationExpired
     case invalidInvitationSecret
+    case unknownDevice
 }
 
 private extension NSLock {
