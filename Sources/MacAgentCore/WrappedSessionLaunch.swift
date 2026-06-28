@@ -1,4 +1,7 @@
 import AgentShared
+#if canImport(AppKit)
+import AppKit
+#endif
 import Foundation
 
 public protocol WorktreeBaselineCapturing: Sendable {
@@ -213,6 +216,24 @@ public protocol GhosttyLaunching: Sendable {
     func openOrFocus(attachCommand: String, sessionName: String) -> String?
 }
 
+public protocol GhosttyRunningProbing: Sendable {
+    func isGhosttyRunning() -> Bool
+}
+
+public struct WorkspaceGhosttyRunningProbe: GhosttyRunningProbing {
+    public init() {}
+
+    public func isGhosttyRunning() -> Bool {
+        #if canImport(AppKit)
+        NSRunningApplication
+            .runningApplications(withBundleIdentifier: "com.mitchellh.ghostty")
+            .isEmpty == false
+        #else
+        false
+        #endif
+    }
+}
+
 /// Opens or focuses Ghostty on the given tmux session.
 /// - If Ghostty is already running: activates it and sends the attach command via AppleScript
 ///   keystroke (requires Accessibility permission for `System Events`).
@@ -220,24 +241,29 @@ public protocol GhosttyLaunching: Sendable {
 ///   via the `-e` flag so it opens directly in the right session.
 public struct GhosttyLauncher: GhosttyLaunching {
     private let executor: any ProcessCommandExecuting
+    private let runningProbe: any GhosttyRunningProbing
 
-    public init(executor: any ProcessCommandExecuting = FoundationProcessCommandExecutor()) {
+    public init(
+        executor: any ProcessCommandExecuting = FoundationProcessCommandExecutor(),
+        runningProbe: any GhosttyRunningProbing = WorkspaceGhosttyRunningProbe()
+    ) {
         self.executor = executor
+        self.runningProbe = runningProbe
     }
 
     public func openOrFocus(attachCommand: String, sessionName: String) -> String? {
-        if ghosttyIsRunning {
-            return activateAndSendCommand(attachCommand)
-        } else {
+        if runningProbe.isGhosttyRunning() {
+            if activateAndSendCommand(attachCommand) == nil {
+                return nil
+            }
+
             return launchFresh(attachCommand: attachCommand)
         }
+
+        return launchFresh(attachCommand: attachCommand)
     }
 
     // MARK: Private
-
-    private var ghosttyIsRunning: Bool {
-        (try? executor.run(executable: "pgrep", arguments: ["-x", "Ghostty"])) != nil
-    }
 
     private func activateAndSendCommand(_ command: String) -> String? {
         // Escape single quotes in the command for AppleScript string literal.

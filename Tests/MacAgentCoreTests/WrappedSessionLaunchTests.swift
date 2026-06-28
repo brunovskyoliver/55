@@ -176,6 +176,70 @@ final class WrappedSessionLaunchTests: XCTestCase {
         XCTAssertEqual(storedEvents.filter { $0.agentSessionID == "session-5" }.count, 3)
         XCTAssertEqual(response.foregroundState.auditTimeline.entries.map(\.title), storedEvents.map(\.title))
     }
+
+    func testGhosttyLauncherReusesRunningGhosttyWhenAppleScriptSucceeds() {
+        let executor = FakeProcessCommandExecutor(results: [
+            "osascript": .success("")
+        ])
+        let launcher = GhosttyLauncher(
+            executor: executor,
+            runningProbe: FakeGhosttyRunningProbe(isRunning: true)
+        )
+
+        let warning = launcher.openOrFocus(
+            attachCommand: "tmux attach-session -t agent-issue-15",
+            sessionName: "agent-issue-15"
+        )
+
+        XCTAssertNil(warning)
+        XCTAssertEqual(executor.executedCommands.map(\.executable), ["osascript"])
+    }
+
+    func testGhosttyLauncherFallsBackToFreshLaunchWhenReuseFails() {
+        let executor = FakeProcessCommandExecutor(results: [
+            "osascript": .failure(ProcessCommandFailure(
+                executable: "osascript",
+                arguments: [],
+                exitCode: 1,
+                stderr: "System Events is not allowed to send keystrokes."
+            )),
+            "open": .success("")
+        ])
+        let launcher = GhosttyLauncher(
+            executor: executor,
+            runningProbe: FakeGhosttyRunningProbe(isRunning: true)
+        )
+
+        let warning = launcher.openOrFocus(
+            attachCommand: "tmux attach-session -t agent-issue-15",
+            sessionName: "agent-issue-15"
+        )
+
+        XCTAssertNil(warning)
+        XCTAssertEqual(executor.executedCommands.map(\.executable), ["osascript", "open"])
+        XCTAssertEqual(
+            executor.executedCommands.last?.arguments,
+            ["-na", "Ghostty.app", "--args", "-e", "tmux", "attach-session", "-t", "agent-issue-15"]
+        )
+    }
+
+    func testGhosttyLauncherFreshLaunchesWhenGhosttyIsNotRunning() {
+        let executor = FakeProcessCommandExecutor(results: [
+            "open": .success("")
+        ])
+        let launcher = GhosttyLauncher(
+            executor: executor,
+            runningProbe: FakeGhosttyRunningProbe(isRunning: false)
+        )
+
+        let warning = launcher.openOrFocus(
+            attachCommand: "tmux attach-session -t agent-issue-15",
+            sessionName: "agent-issue-15"
+        )
+
+        XCTAssertNil(warning)
+        XCTAssertEqual(executor.executedCommands.map(\.executable), ["open"])
+    }
 }
 
 private func launchableService(
@@ -316,15 +380,29 @@ private final class FakeProcessCommandExecutor: ProcessCommandExecuting, @unchec
         case failure(ProcessCommandFailure)
     }
 
+    struct ExecutedCommand: Equatable {
+        var executable: String
+        var arguments: [String]
+    }
+
+    private let lock = NSLock()
     private let results: [String: Result]
+    private var commands: [ExecutedCommand] = []
 
     init(results: [String: Result]) {
         self.results = results
     }
 
+    var executedCommands: [ExecutedCommand] {
+        lock.withLock { commands }
+    }
+
     func run(executable: String, arguments: [String]) throws -> ProcessCommandResult {
+        lock.withLock {
+            commands.append(ExecutedCommand(executable: executable, arguments: arguments))
+        }
         let key = ([executable] + arguments).joined(separator: " ")
-        switch results[key] {
+        switch results[key] ?? results[executable] {
         case .success(let text):
             return ProcessCommandResult(stdout: Data(text.utf8))
         case .failure(let error):
@@ -337,6 +415,14 @@ private final class FakeProcessCommandExecutor: ProcessCommandExecuting, @unchec
                 stderr: "unexpected command: \(key)"
             )
         }
+    }
+}
+
+private struct FakeGhosttyRunningProbe: GhosttyRunningProbing {
+    var isRunning: Bool
+
+    func isGhosttyRunning() -> Bool {
+        isRunning
     }
 }
 
