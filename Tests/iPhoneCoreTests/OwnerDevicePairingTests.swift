@@ -79,7 +79,8 @@ private final class FakePairingCompletionClient: PairingCompletionClient, @unche
 
     func completePairing(
         _ request: PairingCompletionRequest,
-        controlBaseURL: URL
+        controlBaseURL: URL,
+        certFingerprintSHA256: String?
     ) async throws -> PairingCompletionResponse {
         lock.withLock {
             _capturedRequest = request

@@ -118,8 +118,10 @@ struct PairingView: View {
 
                 if let err = errorText {
                     Text(err)
-                        .font(.footnote)
+                        .font(.footnote.monospaced())
                         .foregroundStyle(.red)
+                        .textSelection(.enabled)
+                        .lineLimit(nil)
                         .padding(.horizontal)
                 }
 
@@ -169,7 +171,7 @@ struct PairingView: View {
         } catch OwnerDevicePairingError.pairedTLSRequired {
             errorText = "Pairing requires a secure connection. Ensure the Mac is reachable on the same Wi-Fi."
         } catch {
-            errorText = "Pairing failed: \(error.localizedDescription)"
+            errorText = "Pairing failed: \(error)"
         }
     }
 }
@@ -542,11 +544,21 @@ struct PlanningCenteredRootView: View {
                 } else {
                     List {
                         PlanningArtifactAttachmentSection(loader: loader)
-                        ContentUnavailableView(
-                            "No Foreground State",
-                            systemImage: "iphone.and.arrow.forward",
-                            description: Text(loader.errorText ?? "Open the app to request the current Planning Artifact and Agent Session.")
-                        )
+                        if let err = loader.errorText {
+                            Section("Error") {
+                                Text(err)
+                                    .font(.footnote.monospaced())
+                                    .foregroundStyle(.red)
+                                    .textSelection(.enabled)
+                                    .lineLimit(nil)
+                            }
+                        } else {
+                            ContentUnavailableView(
+                                "No Foreground State",
+                                systemImage: "iphone.and.arrow.forward",
+                                description: Text("Open the app to request the current Planning Artifact and Agent Session.")
+                            )
+                        }
                     }
                 }
             }

@@ -9,12 +9,14 @@
 /* Begin PBXBuildFile section */
 		B8ED1ACBAC229D363BE6A4AF /* AppMain.swift in Sources */ = {isa = PBXBuildFile; fileRef = A89811A29EB7506984C8EC52 /* AppMain.swift */; };
 		BCEB353DE2AAACA480879572 /* iPhoneApp in Frameworks */ = {isa = PBXBuildFile; productRef = 609E242329B642B7C28C00E0 /* iPhoneApp */; };
+		D1A2B3C4D5E6F7A8B9C0D1E2 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = D1A2B3C4D5E6F7A8B9C0D1E3 /* PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		163B7DC9D00AA61BC9547439 /* 55 */ = {isa = PBXFileReference; lastKnownFileType = folder; name = 55; path = ..; sourceTree = SOURCE_ROOT; };
-		8C0E1BAA9285D7565345151A /* AgentControl.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AgentControl.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		8C0E1BAA9285D7565345151A /* AgentControl.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AgentControl.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A89811A29EB7506984C8EC52 /* AppMain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppMain.swift; sourceTree = "<group>"; };
+		D1A2B3C4D5E6F7A8B9C0D1E3 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -58,6 +60,7 @@
 			isa = PBXGroup;
 			children = (
 				A89811A29EB7506984C8EC52 /* AppMain.swift */,
+				D1A2B3C4D5E6F7A8B9C0D1E3 /* PrivacyInfo.xcprivacy */,
 			);
 			path = Sources;
 			sourceTree = "<group>";
@@ -71,6 +74,7 @@
 			buildPhases = (
 				55A857C445913F53662D8AE7 /* Sources */,
 				F5BAF7D8439EAEFE8109E990 /* Frameworks */,
+				D1A2B3C4D5E6F7A8B9C0D1E4 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -92,11 +96,6 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1500;
-				TargetAttributes = {
-					324ABE2FB3A3C75B1A271011 = {
-						DevelopmentTeam = "";
-					};
-				};
 			};
 			buildConfigurationList = 42F036F8B220386CF19B2AA8 /* Build configuration list for PBXProject "AgentControl" */;
 			developmentRegion = en;
@@ -120,6 +119,17 @@
 		};
 /* End PBXProject section */
 
+/* Begin PBXResourcesBuildPhase section */
+		D1A2B3C4D5E6F7A8B9C0D1E4 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D1A2B3C4D5E6F7A8B9C0D1E2 /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		55A857C445913F53662D8AE7 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -138,7 +148,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = QUB47S3XTF;
 				INFOPLIST_FILE = Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -215,7 +225,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = QUB47S3XTF;
 				INFOPLIST_FILE = Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (

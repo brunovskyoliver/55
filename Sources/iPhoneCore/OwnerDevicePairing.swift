@@ -12,17 +12,16 @@ public struct OwnerDevicePairingScanner: Sendable {
 public protocol PairingCompletionClient: Sendable {
     func completePairing(
         _ request: PairingCompletionRequest,
-        controlBaseURL: URL
+        controlBaseURL: URL,
+        certFingerprintSHA256: String?
     ) async throws -> PairingCompletionResponse
 }
 
 public struct HTTPPairingCompletionClient: PairingCompletionClient {
-    private let session: URLSession
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
-    public init(session: URLSession = .shared) {
-        self.session = session
+    public init() {
         self.encoder = JSONEncoder()
         self.encoder.dateEncodingStrategy = .iso8601
         self.decoder = JSONDecoder()
@@ -31,10 +30,18 @@ public struct HTTPPairingCompletionClient: PairingCompletionClient {
 
     public func completePairing(
         _ request: PairingCompletionRequest,
-        controlBaseURL: URL
+        controlBaseURL: URL,
+        certFingerprintSHA256: String?
     ) async throws -> PairingCompletionResponse {
         guard controlBaseURL.scheme == "https" else {
             throw OwnerDevicePairingError.pairedTLSRequired
+        }
+
+        let session: URLSession
+        if let fp = certFingerprintSHA256 {
+            session = pinnedURLSession(certFingerprintSHA256: fp)
+        } else {
+            session = .shared
         }
 
         var urlRequest = URLRequest(url: controlBaseURL.appending(path: "v1/pairings/complete"))
@@ -81,7 +88,7 @@ public struct OwnerDevicePairingService: Sendable {
             ownerDeviceName: ownerDeviceName,
             ownerDevicePublicKey: ownerDevicePublicKey
         )
-        let response = try await client.completePairing(request, controlBaseURL: invitation.controlBaseURL)
+        let response = try await client.completePairing(request, controlBaseURL: invitation.controlBaseURL, certFingerprintSHA256: invitation.certFingerprintSHA256)
         try credentialStore.store(response.credentials)
         return response
     }

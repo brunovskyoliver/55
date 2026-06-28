@@ -140,6 +140,13 @@ struct MacAgentMenuView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(payload, forType: .string)
+                    } label: {
+                        Label("Copy Pairing Code", systemImage: "doc.on.doc")
+                    }
+                    .font(.caption)
                 }
                 .frame(maxWidth: .infinity)
             }
