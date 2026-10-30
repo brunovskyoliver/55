@@ -3,6 +3,8 @@ import Foundation
 public enum SessionEventType: String, Codable, Equatable, CaseIterable, Sendable {
     case planningArtifactAttached
     case sessionLifecycle
+    /// Pending Input detected, cleared, or replied to via the adapter bridge.
+    case pendingInput
     case structuredActionAttempt
     case structuredActionResult
     case githubAction

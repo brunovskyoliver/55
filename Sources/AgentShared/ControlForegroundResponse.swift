@@ -179,11 +179,14 @@ public struct TmuxAttachmentInfo: Codable, Equatable, Sendable {
     public var sessionName: String
     public var windowName: String
     public var attachCommand: String
+    /// Stable tmux pane id (e.g. "%3") — survives respawn-pane; use for precise send-keys/respawn targeting.
+    public var paneID: String?
 
-    public init(sessionName: String, windowName: String, attachCommand: String) {
+    public init(sessionName: String, windowName: String, attachCommand: String, paneID: String? = nil) {
         self.sessionName = sessionName
         self.windowName = windowName
         self.attachCommand = attachCommand
+        self.paneID = paneID
     }
 }
 

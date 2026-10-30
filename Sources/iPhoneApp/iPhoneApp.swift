@@ -2,12 +2,41 @@ import AgentShared
 import Foundation
 import iPhoneCore
 import SwiftUI
+import UserNotifications
 #if os(iOS)
+import UIKit
 import VisionKit
 #endif
 
 #if os(iOS)
+
+// MARK: - AppDelegate
+
+class AppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+        application.registerForRemoteNotifications()
+        return true
+    }
+
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        let hex = deviceToken.map { String(format: "%02x", $0) }.joined()
+        UserDefaults.standard.set(hex, forKey: "AgentSessionControl.pushTokenHex")
+        NotificationCenter.default.post(name: .pushTokenDidUpdate, object: hex)
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {}
+}
+
+extension Notification.Name {
+    static let pushTokenDidUpdate = Notification.Name("AgentSessionControl.pushTokenDidUpdate")
+}
+
 public struct iPhoneApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     public init() {}
     public var body: some Scene {
         WindowGroup {
@@ -23,28 +52,51 @@ public struct AppRootView: View {
     @State private var localDisconnectWarning: String?
 
     public var body: some View {
-        if let creds = credentials {
-            PlanningCenteredRootView(
-                loader: .pairedAPI(credentials: creds),
-                credentials: creds,
-                onDisconnected: {
+        Group {
+            if let creds = credentials {
+                PlanningCenteredRootView(
+                    loader: .pairedAPI(credentials: creds),
+                    credentials: creds,
+                    onDisconnected: {
+                        localDisconnectWarning = nil
+                        credentials = nil
+                    },
+                    onLocalDisconnect: { warning in
+                        clearStoredCredentials()
+                        localDisconnectWarning = warning
+                        credentials = nil
+                    }
+                )
+            } else {
+                PairingView(localDisconnectWarning: localDisconnectWarning) { paired in
                     localDisconnectWarning = nil
-                    credentials = nil
-                },
-                onLocalDisconnect: { warning in
-                    clearStoredCredentials()
-                    localDisconnectWarning = warning
-                    credentials = nil
+                    storeCredentials(paired)
+                    credentials = paired
                 }
-            )
-        } else {
-            PairingView(localDisconnectWarning: localDisconnectWarning) { paired in
-                localDisconnectWarning = nil
-                storeCredentials(paired)
-                credentials = paired
             }
         }
+        .preferredColorScheme(.dark)
+        .task(id: credentials?.deviceID) {
+            guard let creds = credentials else { return }
+            await registerStoredPushTokenIfAvailable(credentials: creds)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .pushTokenDidUpdate)) { _ in
+            guard let creds = credentials else { return }
+            Task { await registerStoredPushTokenIfAvailable(credentials: creds) }
+        }
     }
+}
+
+private func registerStoredPushTokenIfAvailable(credentials: PairedControlCredentials) async {
+    guard let hex = UserDefaults.standard.string(forKey: "AgentSessionControl.pushTokenHex"),
+          !hex.isEmpty else { return }
+    #if DEBUG
+    let environment = "development"
+    #else
+    let environment = "production"
+    #endif
+    let client = HTTPForegroundStateClient(baseURL: credentials.controlBaseURL, credentials: credentials)
+    try? await client.registerPushToken(RegisterPushTokenRequest(token: hex, environment: environment))
 }
 
 // MARK: - Credential persistence (UserDefaults + Keychain)
@@ -264,6 +316,36 @@ struct iPhoneApp {
 }
 #endif
 
+enum AppTab: String, CaseIterable {
+    case claudeCode
+    case audit
+    case info
+
+    var title: String {
+        switch self {
+        case .claudeCode: return "Claude Code"
+        case .audit: return "Audit"
+        case .info: return "Info"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .claudeCode: return "terminal"
+        case .audit: return "list.bullet.clipboard"
+        case .info: return "info.circle"
+        }
+    }
+
+    var selectedIcon: String {
+        switch self {
+        case .claudeCode: return "terminal.fill"
+        case .audit: return "list.bullet.clipboard.fill"
+        case .info: return "info.circle.fill"
+        }
+    }
+}
+
 #if os(iOS)
 @MainActor
 @Observable
@@ -285,6 +367,13 @@ final class PlanningCenteredStore {
     var isConfirmingStop = false
     var approvalDecisionToConfirm: ApprovalRequestDecision?
     var draftCommentDecisionToConfirm: DraftCommentDecision?
+    var selectedTab: AppTab = .claudeCode
+    /// Sessions visible on the Mac that can be attached to (populated on demand).
+    var discoverableSessions: [DiscoverableSession] = []
+    var isRefreshingDiscoverable = false
+    var isAttachingSession = false
+    var sessionAttachError: String?
+    private var pollingTask: Task<Void, Never>?
 
     private let loadState: @Sendable () async throws -> PlanningCenteredState
     private let attachPlanningArtifact: @Sendable (AttachPlanningArtifactRequest) async throws -> PlanningCenteredState
@@ -295,6 +384,8 @@ final class PlanningCenteredStore {
     private let prepareDraftComment: @Sendable (PrepareDraftCommentRequest) async throws -> PlanningCenteredState
     private let submitDraftCommentDecision: @Sendable (SubmitDraftCommentDecisionRequest) async throws -> PlanningCenteredState
     private let disconnectPairing: @Sendable () async throws -> Void
+    private let listDiscoverableSessionsAction: (@Sendable () async throws -> [DiscoverableSession])?
+    private let attachSessionAction: (@Sendable (AttachSessionRequest) async throws -> PlanningCenteredState)?
 
     init(
         loadState: @escaping @Sendable () async throws -> PlanningCenteredState,
@@ -305,7 +396,9 @@ final class PlanningCenteredStore {
         submitApprovalDecision: @escaping @Sendable (SubmitApprovalDecisionRequest) async throws -> PlanningCenteredState,
         prepareDraftComment: @escaping @Sendable (PrepareDraftCommentRequest) async throws -> PlanningCenteredState,
         submitDraftCommentDecision: @escaping @Sendable (SubmitDraftCommentDecisionRequest) async throws -> PlanningCenteredState,
-        disconnectPairing: @escaping @Sendable () async throws -> Void
+        disconnectPairing: @escaping @Sendable () async throws -> Void,
+        listDiscoverableSessions: (@Sendable () async throws -> [DiscoverableSession])? = nil,
+        attachSession: (@Sendable (AttachSessionRequest) async throws -> PlanningCenteredState)? = nil
     ) {
         self.loadState = loadState
         self.attachPlanningArtifact = attachPlanningArtifact
@@ -316,6 +409,8 @@ final class PlanningCenteredStore {
         self.prepareDraftComment = prepareDraftComment
         self.submitDraftCommentDecision = submitDraftCommentDecision
         self.disconnectPairing = disconnectPairing
+        self.listDiscoverableSessionsAction = listDiscoverableSessions
+        self.attachSessionAction = attachSession
     }
 
     func foregroundSync() async {
@@ -328,6 +423,52 @@ final class PlanningCenteredStore {
         } catch {
             errorText = "Foreground Sync failed: \(error)"
         }
+    }
+
+    func startPolling() {
+        guard pollingTask == nil else { return }
+        pollingTask = Task { [weak self] in
+            var consecutiveErrors = 0
+            while !Task.isCancelled {
+                if let self {
+                    await self.pollOnce(consecutiveErrors: consecutiveErrors)
+                    consecutiveErrors = self.errorText != nil ? consecutiveErrors + 1 : 0
+                }
+                // Back off to 5s after 3 consecutive errors to avoid hammering an unreachable host.
+                let delay: UInt64 = consecutiveErrors > 3 ? 5_000_000_000 : 1_000_000_000
+                try? await Task.sleep(nanoseconds: delay)
+            }
+        }
+    }
+
+    /// Like `foregroundSync` but suppresses transient errors for the first 2 consecutive failures,
+    /// so minor LAN hiccups don't flash an error message.
+    private func pollOnce(consecutiveErrors: Int) async {
+        do {
+            updateState(try await loadState())
+            errorText = nil
+        } catch {
+            if consecutiveErrors >= 2 {
+                errorText = "Mac Agent unreachable — \(urlErrorDescription(error) ?? error.localizedDescription)"
+            }
+            // First 2 failures: clear stale state but don't overwrite existing errorText with a new one.
+        }
+    }
+
+    private func urlErrorDescription(_ error: Error) -> String? {
+        guard let urlError = error as? URLError else { return nil }
+        switch urlError.code {
+        case .timedOut: return "connection timed out"
+        case .cannotConnectToHost: return "cannot connect to host"
+        case .networkConnectionLost: return "network connection lost"
+        case .notConnectedToInternet: return "not connected to internet"
+        default: return nil
+        }
+    }
+
+    func stopPolling() {
+        pollingTask?.cancel()
+        pollingTask = nil
     }
 
     func attach(kind: PlanningArtifact.Kind, reference: String) async {
@@ -368,6 +509,42 @@ final class PlanningCenteredStore {
         }
     }
 
+    func refreshDiscoverable() async {
+        guard let action = listDiscoverableSessionsAction else { return }
+        isRefreshingDiscoverable = true
+        defer { isRefreshingDiscoverable = false }
+
+        do {
+            discoverableSessions = try await action()
+            sessionAttachError = nil
+        } catch let error as ForegroundStateClientError {
+            sessionAttachError = error.localizedDescription
+        } catch {
+            sessionAttachError = "Session discovery failed: \(error)"
+        }
+    }
+
+    func attachSession(sessionID: String) async {
+        guard let action = attachSessionAction else { return }
+        isAttachingSession = true
+        defer { isAttachingSession = false }
+
+        do {
+            updateState(try await action(AttachSessionRequest(sessionID: sessionID)))
+            sessionAttachError = nil
+            discoverableSessions = []
+        } catch let error as ForegroundStateClientError {
+            switch error {
+            case .requestFailed(_, let message):
+                sessionAttachError = message
+            default:
+                sessionAttachError = "Session attach failed: \(error)"
+            }
+        } catch {
+            sessionAttachError = "Session attach failed: \(error)"
+        }
+    }
+
     func stopSession() async {
         isStoppingSession = true
         defer { isStoppingSession = false }
@@ -388,18 +565,24 @@ final class PlanningCenteredStore {
         }
     }
 
-    func submitReply(confirmUncertainInput: Bool = false) async {
+    /// Submit a reply to Pending Input.
+    /// When `text` is provided (choice tap), that text is sent; otherwise `replyText` is used.
+    /// The current `requestID` is always included so the Mac can reject stale replies.
+    func submitReply(text: String? = nil, confirmUncertainInput: Bool = false) async {
         isSubmittingReply = true
         defer { isSubmittingReply = false }
 
+        let reply = text ?? replyText
+        let requestID = state?.pendingInput?.requestID
         do {
             updateState(try await submitPendingInputReply(
                 SubmitPendingInputReplyRequest(
-                    reply: replyText,
-                    confirmUncertainInput: confirmUncertainInput
+                    reply: reply,
+                    confirmUncertainInput: confirmUncertainInput,
+                    requestID: requestID
                 )
             ))
-            replyText = ""
+            if text == nil { replyText = "" }
             errorText = nil
         } catch let error as ForegroundStateClientError {
             switch error {
@@ -503,67 +686,115 @@ final class PlanningCenteredStore {
     }
 }
 
+/// Caches the resolved `HTTPForegroundStateClient` for the lifetime of a foreground session.
+/// Resolves via Bonjour once per session; falls back to the stored URL when unavailable.
+/// Invalidated on `URLError` (the Mac's IP may have changed) so the next call re-resolves.
+private actor ForegroundClientCache {
+    private var _client: HTTPForegroundStateClient?
+    private let credentials: PairedControlCredentials
+
+    init(credentials: PairedControlCredentials) {
+        self.credentials = credentials
+    }
+
+    func client() async throws -> HTTPForegroundStateClient {
+        if let cached = _client { return cached }
+        let fresh = try await build()
+        _client = fresh
+        return fresh
+    }
+
+    func invalidate() {
+        _client = nil
+    }
+
+    private func build() async throws -> HTTPForegroundStateClient {
+        let baseURL: URL
+        if let name = credentials.bonjourServiceName,
+           let resolved = try? await BonjourResolver.resolve(serviceName: name) {
+            baseURL = resolved
+        } else {
+            baseURL = credentials.controlBaseURL
+        }
+        let session: URLSession
+        if let fp = credentials.certFingerprintSHA256 {
+            session = pinnedURLSession(certFingerprintSHA256: fp)
+        } else {
+            session = .shared
+        }
+        return HTTPForegroundStateClient(baseURL: baseURL, credentials: credentials, session: session)
+    }
+}
+
 extension PlanningCenteredStore {
     /// Builds a store wired to the paired Mac Agent.
-    /// Uses Bonjour to resolve the current LAN IP at each request, falling back to the stored URL.
-    /// When a cert fingerprint is stored, pins the TLS connection to that specific certificate.
+    /// The Bonjour URL is resolved once per foreground session and reused for all polls.
+    /// On `URLError` the cache is invalidated so the next request re-resolves.
     static func pairedAPI(credentials: PairedControlCredentials) -> PlanningCenteredStore {
+        let cache = ForegroundClientCache(credentials: credentials)
+
         @Sendable func resolvedClient() async throws -> HTTPForegroundStateClient {
-            // Resolve via Bonjour if we have a service name; fall back to stored URL.
-            let baseURL: URL
-            if let name = credentials.bonjourServiceName,
-               let resolved = try? await BonjourResolver.resolve(serviceName: name) {
-                baseURL = resolved
-            } else {
-                baseURL = credentials.controlBaseURL
+            do {
+                return try await cache.client()
+            } catch {
+                await cache.invalidate()
+                throw error
             }
+        }
 
-            // Build a cert-pinning URLSession when we have a stored fingerprint.
-            let session: URLSession
-            if let fp = credentials.certFingerprintSHA256 {
-                session = pinnedURLSession(certFingerprintSHA256: fp)
-            } else {
-                session = .shared
+        @Sendable func invalidatingClient<T>(_ work: (HTTPForegroundStateClient) async throws -> T) async throws -> T {
+            let client = try await resolvedClient()
+            do {
+                return try await work(client)
+            } catch {
+                if error is URLError { await cache.invalidate() }
+                throw error
             }
-
-            return HTTPForegroundStateClient(baseURL: baseURL, credentials: credentials, session: session)
         }
 
         return PlanningCenteredStore {
-            let client = try await resolvedClient()
-            return try await ForegroundStateLoader(client: client).load()
+            try await invalidatingClient { try await ForegroundStateLoader(client: $0).load() }
         } attachPlanningArtifact: { request in
-            let client = try await resolvedClient()
-            let response = try await client.attachPlanningArtifact(request)
-            return try PlanningStateMapper().map(response.foregroundState)
+            try await invalidatingClient {
+                try PlanningStateMapper().map(try await $0.attachPlanningArtifact(request).foregroundState)
+            }
         } startWrappedSession: {
-            let client = try await resolvedClient()
-            let response = try await client.startWrappedSession()
-            return try PlanningStateMapper().map(response.foregroundState)
+            try await invalidatingClient {
+                try PlanningStateMapper().map(try await $0.startWrappedSession().foregroundState)
+            }
         } stopWrappedSession: { request in
-            let client = try await resolvedClient()
-            let response = try await client.stopWrappedSession(request)
-            return try PlanningStateMapper().map(response.foregroundState)
+            try await invalidatingClient {
+                try PlanningStateMapper().map(try await $0.stopWrappedSession(request).foregroundState)
+            }
         } submitPendingInputReply: { request in
-            let client = try await resolvedClient()
-            let response = try await client.submitPendingInputReply(request)
-            return try PlanningStateMapper().map(response.foregroundState)
+            try await invalidatingClient {
+                try PlanningStateMapper().map(try await $0.submitPendingInputReply(request).foregroundState)
+            }
         } submitApprovalDecision: { request in
-            let client = try await resolvedClient()
-            let response = try await client.submitApprovalDecision(request)
-            return try PlanningStateMapper().map(response.foregroundState)
+            try await invalidatingClient {
+                try PlanningStateMapper().map(try await $0.submitApprovalDecision(request).foregroundState)
+            }
         } prepareDraftComment: { request in
-            let client = try await resolvedClient()
-            let response = try await client.prepareDraftComment(request)
-            return try PlanningStateMapper().map(response.foregroundState)
+            try await invalidatingClient {
+                try PlanningStateMapper().map(try await $0.prepareDraftComment(request).foregroundState)
+            }
         } submitDraftCommentDecision: { request in
-            let client = try await resolvedClient()
-            let response = try await client.submitDraftCommentDecision(request)
-            return try PlanningStateMapper().map(response.foregroundState)
+            try await invalidatingClient {
+                try PlanningStateMapper().map(try await $0.submitDraftCommentDecision(request).foregroundState)
+            }
         } disconnectPairing: {
-            let client = try await resolvedClient()
-            try await client.revokePairing()
-            clearStoredCredentials()
+            try await invalidatingClient {
+                try await $0.revokePairing()
+                clearStoredCredentials()
+            }
+        } listDiscoverableSessions: {
+            try await invalidatingClient {
+                try await $0.listDiscoverableSessions().sessions
+            }
+        } attachSession: { request in
+            try await invalidatingClient {
+                try PlanningStateMapper().map(try await $0.attachSession(request).foregroundState)
+            }
         }
     }
 }
@@ -587,61 +818,550 @@ struct PlanningCenteredRootView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if let state = loader.state {
-                    PlanningCenteredView(state: state, loader: loader)
-                } else {
-                    List {
-                        PlanningArtifactAttachmentSection(loader: loader)
-                        if let err = loader.errorText {
-                            Section("Error") {
-                                Text(err)
-                                    .font(.footnote.monospaced())
-                                    .foregroundStyle(.red)
-                                    .textSelection(.enabled)
-                                    .lineLimit(nil)
-                            }
-                        } else {
-                            ContentUnavailableView(
-                                "No Foreground State",
-                                systemImage: "iphone.and.arrow.forward",
-                                description: Text("Open the app to request the current Planning Artifact and Agent Session.")
-                            )
-                        }
-                    }
-                }
-            }
-            .navigationTitle("Planning")
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    NavigationLink {
-                        MacDetailView(
-                            state: loader.state,
-                            credentials: credentials,
-                            loader: loader,
-                            onDisconnected: onDisconnected,
-                            onLocalDisconnect: onLocalDisconnect
-                        )
-                    } label: {
-                        Label("Mac", systemImage: "info.circle")
-                    }
-                }
+        RootTabView(
+            loader: loader,
+            credentials: credentials,
+            onDisconnected: onDisconnected,
+            onLocalDisconnect: onLocalDisconnect
+        )
+    }
+}
 
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        Task {
-                            await loader.foregroundSync()
-                        }
-                    } label: {
-                        Label("Foreground Sync", systemImage: "arrow.clockwise")
-                    }
-                    .disabled(loader.isLoading)
+// MARK: - Tab Root
+
+struct RootTabView: View {
+    @Bindable var loader: PlanningCenteredStore
+    let credentials: PairedControlCredentials
+    let onDisconnected: () -> Void
+    let onLocalDisconnect: (String) -> Void
+    @Environment(\.scenePhase) private var scenePhase
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            Group {
+                switch loader.selectedTab {
+                case .claudeCode:
+                    ClaudeCodeTab(loader: loader)
+                case .audit:
+                    AuditTab(loader: loader)
+                case .info:
+                    InfoTab(
+                        loader: loader,
+                        credentials: credentials,
+                        onDisconnected: onDisconnected,
+                        onLocalDisconnect: onLocalDisconnect
+                    )
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            FloatingTabBar(selectedTab: $loader.selectedTab)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 8)
         }
         .task {
             await loader.foregroundSync()
+            loader.startPolling()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                loader.startPolling()
+            } else {
+                loader.stopPolling()
+            }
+        }
+        .onDisappear {
+            loader.stopPolling()
+        }
+    }
+}
+
+// MARK: - Floating Tab Bar
+
+struct FloatingTabBar: View {
+    @Binding var selectedTab: AppTab
+    @Namespace private var tabNamespace
+
+    var body: some View {
+        GlassEffectContainer(spacing: 0) {
+            HStack(spacing: 0) {
+                ForEach(AppTab.allCases, id: \.self) { tab in
+                    tabButton(tab)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 8)
+            .glassEffect(.regular, in: Capsule())
+        }
+    }
+
+    private func tabButton(_ tab: AppTab) -> some View {
+        Button {
+            withAnimation(.agentSpring) {
+                selectedTab = tab
+            }
+        } label: {
+            VStack(spacing: 3) {
+                Image(systemName: selectedTab == tab ? tab.selectedIcon : tab.icon)
+                    .font(.system(size: 20, weight: selectedTab == tab ? .semibold : .regular))
+                    .foregroundStyle(selectedTab == tab ? Color.agentGreen : Color.secondary)
+                Text(tab.title)
+                    .font(.caption2.weight(selectedTab == tab ? .semibold : .regular))
+                    .foregroundStyle(selectedTab == tab ? Color.agentGreen : Color.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Claude Code Tab
+
+struct ClaudeCodeTab: View {
+    @Bindable var loader: PlanningCenteredStore
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                GlassTabBackground()
+
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        if let state = loader.state, let session = state.attachedSession {
+                            // Attached: header → attention → file changes
+                            sessionHeaderSection(session, actions: state.structuredActions)
+                            if let pendingInput = state.pendingInput {
+                                PendingInputCard(pendingInput: pendingInput, loader: loader)
+                            }
+                            if let approval = state.pendingApprovalRequest {
+                                approvalSection(approval)
+                            }
+                            let agentFiles = state.fileReview.files.filter { $0.ownershipTitle != "Pre-existing" }
+                            if !agentFiles.isEmpty {
+                                FileReviewSection(summary: FileReviewSummary(
+                                    title: state.fileReview.title,
+                                    detail: state.fileReview.detail,
+                                    changedFileCount: agentFiles.count,
+                                    preExistingChangeCount: 0,
+                                    agentSessionChangeCount: state.fileReview.agentSessionChangeCount,
+                                    files: agentFiles
+                                ))
+                            }
+                        } else {
+                            // No session: only the session picker
+                            AgentSessionSection(session: nil, loader: loader)
+                            if let err = loader.errorText {
+                                GlassSection("Error") {
+                                    Text(err)
+                                        .font(.footnote.monospaced())
+                                        .foregroundStyle(Color.agentError)
+                                        .textSelection(.enabled)
+                                        .lineLimit(nil)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, 100) // clearance for floating tab bar
+                }
+                .refreshable {
+                    await loader.foregroundSync()
+                }
+            }
+            .navigationTitle("Claude Code")
+            .navigationBarTitleDisplayMode(.large)
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
+        }
+    }
+
+    @ViewBuilder
+    private func sessionHeaderSection(_ session: AttachedSessionSummary, actions: [StructuredActionSummary]) -> some View {
+        GlassSection {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(session.title)
+                            .font(.headline)
+                            .lineLimit(1)
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(sessionStatusColor(session.stateText))
+                                .frame(width: 7, height: 7)
+                            Text(session.stateText)
+                                .font(.subheadline)
+                                .foregroundStyle(sessionStatusColor(session.stateText))
+                        }
+                    }
+                    Spacer()
+                    if let stop = actions.first(where: { $0.id == "guarded-stop" }), stop.isAvailable {
+                        Button(role: .destructive) {
+                            loader.isConfirmingStop = true
+                        } label: {
+                            Image(systemName: "stop.circle")
+                                .font(.title2)
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(Color.agentError)
+                        .disabled(loader.isStoppingSession)
+                        .confirmationDialog(
+                            "Stop active Wrapped Session?",
+                            isPresented: $loader.isConfirmingStop,
+                            titleVisibility: .visible
+                        ) {
+                            Button("Stop Session", role: .destructive) {
+                                Task { await loader.stopSession() }
+                            }
+                            Button("Cancel", role: .cancel) { loader.isConfirmingStop = false }
+                        }
+                    }
+                }
+                Text(session.summary)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                if let tmuxCmd = session.tmuxAttachCommand {
+                    Text(tmuxCmd)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.tertiary)
+                        .textSelection(.enabled)
+                }
+                if let baseline = session.baselineSummary {
+                    Text(baseline)
+                        .font(.caption)
+                        .foregroundStyle(session.baselineIsDirty ? Color.agentWarning : .secondary)
+                }
+            }
+        }
+    }
+
+    private func sessionStatusColor(_ stateText: String) -> Color {
+        switch stateText {
+        case "Running":
+            return Color.agentGreen
+        case "Waiting for Input", "Waiting for Approval":
+            return Color.agentWarning
+        case "Failed to Stop":
+            return Color.agentError
+        default:
+            return Color.secondary
+        }
+    }
+
+    @ViewBuilder
+    private func approvalSection(_ approval: ApprovalRequestSummary) -> some View {
+        GlassSection("Approval Required") {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Action Requested", systemImage: "exclamationmark.triangle.fill")
+                    .font(.headline)
+                    .foregroundStyle(Color.agentWarning)
+                Text(approval.title)
+                    .font(.body)
+                Text(approval.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    Button {
+                        loader.approvalDecisionToConfirm = .approve
+                    } label: {
+                        Label("Approve", systemImage: "checkmark.circle.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.glass)
+                    .disabled(loader.isSubmittingApprovalDecision)
+
+                    Button(role: .destructive) {
+                        loader.approvalDecisionToConfirm = .deny
+                    } label: {
+                        Label("Deny", systemImage: "xmark.circle.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.glassProminent)
+                    .disabled(loader.isSubmittingApprovalDecision)
+                }
+            }
+        }
+        .confirmationDialog(
+            "Send approval decision?",
+            isPresented: Binding(
+                get: { loader.approvalDecisionToConfirm != nil },
+                set: { if !$0 { loader.approvalDecisionToConfirm = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let decision = loader.approvalDecisionToConfirm {
+                Button(decision == .approve ? "Approve" : "Deny", role: decision == .deny ? .destructive : nil) {
+                    Task { await loader.decideApproval(decision, requestID: approval.id) }
+                }
+            }
+            Button("Cancel", role: .cancel) { loader.approvalDecisionToConfirm = nil }
+        }
+    }
+
+    @ViewBuilder
+    private func prepareDraftSection(_ action: StructuredActionSummary) -> some View {
+        GlassSection("Draft Comment") {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(action.reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button {
+                    Task { await loader.prepareDraft() }
+                } label: {
+                    Label("Prepare Draft", systemImage: "doc.text.magnifyingglass")
+                }
+                .buttonStyle(.glass)
+                .disabled(loader.isPreparingDraftComment)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func draftCommentSection(_ draft: DraftCommentSummary) -> some View {
+        GlassSection("Draft Comment") {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(draft.title).font(.body)
+                Text(draft.statusText).font(.caption).foregroundStyle(.secondary)
+                TextField("Draft Comment", text: $loader.draftCommentBody, axis: .vertical)
+                    .font(.caption)
+                    .lineLimit(6...12)
+                if let failure = draft.failureMessage {
+                    Text(failure).font(.caption).foregroundStyle(.red)
+                }
+                HStack {
+                    Button {
+                        loader.draftCommentDecisionToConfirm = .approve
+                    } label: {
+                        Label("Post", systemImage: "paperplane.fill")
+                    }
+                    .disabled(!draft.requiresApproval || loader.draftCommentBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || loader.isSubmittingDraftCommentDecision)
+
+                    Button(role: .destructive) {
+                        loader.draftCommentDecisionToConfirm = .reject
+                    } label: {
+                        Label("Reject", systemImage: "xmark.circle.fill")
+                    }
+                    .disabled(!draft.requiresApproval || loader.isSubmittingDraftCommentDecision)
+                }
+            }
+        }
+        .confirmationDialog(
+            "Decide Draft Comment?",
+            isPresented: Binding(
+                get: { loader.draftCommentDecisionToConfirm != nil },
+                set: { if !$0 { loader.draftCommentDecisionToConfirm = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let decision = loader.draftCommentDecisionToConfirm {
+                Button(decision == .approve ? "Post to GitHub" : "Reject", role: decision == .reject ? .destructive : nil) {
+                    Task { await loader.decideDraftComment(decision, draftID: draft.id) }
+                }
+            }
+            Button("Cancel", role: .cancel) { loader.draftCommentDecisionToConfirm = nil }
+        }
+    }
+
+    @ViewBuilder
+    private func guardedStopSection(_ actions: [StructuredActionSummary]) -> some View {
+        if let stop = actions.first(where: { $0.id == "guarded-stop" }), stop.isAvailable {
+            GlassSection {
+                Button(role: .destructive) {
+                    loader.isConfirmingStop = true
+                } label: {
+                    Label("Stop Agent Session", systemImage: "stop.circle.fill")
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
+                .buttonStyle(.glassProminent)
+                .disabled(loader.isStoppingSession)
+                .confirmationDialog(
+                    "Stop active Wrapped Session?",
+                    isPresented: $loader.isConfirmingStop,
+                    titleVisibility: .visible
+                ) {
+                    Button("Stop Session", role: .destructive) {
+                        Task { await loader.stopSession() }
+                    }
+                    Button("Cancel", role: .cancel) { loader.isConfirmingStop = false }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Pending Input Card
+
+struct PendingInputCard: View {
+    let pendingInput: PendingInputState
+    @Bindable var loader: PlanningCenteredStore
+
+    var isUncertain: Bool { pendingInput.status == .uncertain }
+
+    var body: some View {
+        GlassSection("Pending Input") {
+            VStack(alignment: .leading, spacing: 12) {
+                Label(isUncertain ? "Uncertain Input" : "Claude is waiting",
+                      systemImage: isUncertain ? "questionmark.bubble.fill" : "bubble.left.and.exclamationmark.bubble.right.fill")
+                    .font(.headline)
+                    .foregroundStyle(isUncertain ? Color.agentWarning : Color.agentGreen)
+
+                if isUncertain {
+                    HStack(spacing: 6) {
+                        Image(systemName: "questionmark.circle")
+                            .foregroundStyle(.orange)
+                        Text("Uncertain Pending Input — confirm before replying")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
+
+                if let prompt = pendingInput.prompt {
+                    Text(prompt)
+                        .font(.body)
+                }
+
+                if !pendingInput.options.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Choose an answer:")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        ForEach(pendingInput.options) { option in
+                            choiceButton(option)
+                        }
+                    }
+                }
+
+                // Free-text reply field (always present as fallback)
+                VStack(alignment: .leading, spacing: 6) {
+                    if !pendingInput.options.isEmpty {
+                        Text("Or type a different reply:")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    TextField("Reply", text: $loader.replyText, axis: .vertical)
+                        .lineLimit(1...4)
+                        .textInputAutocapitalization(.sentences)
+
+                    Button {
+                        if isUncertain {
+                            loader.isConfirmingUncertainReply = true
+                        } else {
+                            Task { await loader.submitReply() }
+                        }
+                    } label: {
+                        Label("Send Reply", systemImage: "paperplane.fill")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .disabled(loader.replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || loader.isSubmittingReply)
+                    .confirmationDialog(
+                        "Send reply to uncertain Pending Input?",
+                        isPresented: $loader.isConfirmingUncertainReply,
+                        titleVisibility: .visible
+                    ) {
+                        Button("Send Reply", role: .destructive) {
+                            Task { await loader.submitReply(confirmUncertainInput: true) }
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    }
+                }
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    private func choiceButton(_ option: PendingInputOption) -> some View {
+        Button {
+            if isUncertain {
+                loader.replyText = option.label
+                loader.isConfirmingUncertainReply = true
+            } else {
+                Task { await loader.submitReply(text: option.label) }
+            }
+        } label: {
+            HStack {
+                Text(option.label)
+                    .font(.body)
+                    .multilineTextAlignment(.leading)
+                Spacer()
+                Image(systemName: "arrow.up.circle.fill")
+                    .foregroundStyle(Color.agentGreen)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+        .disabled(loader.isSubmittingReply)
+    }
+}
+
+// MARK: - Audit Tab
+
+struct AuditTab: View {
+    @Bindable var loader: PlanningCenteredStore
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                GlassTabBackground()
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        if let state = loader.state {
+                            AuditTimelineSection(summary: state.auditTimeline)
+                        } else if let err = loader.errorText {
+                            GlassSection("Error") {
+                                Text(err)
+                                    .font(.footnote.monospaced())
+                                    .foregroundStyle(Color.agentError)
+                                    .textSelection(.enabled)
+                            }
+                        } else {
+                            GlassSection {
+                                ContentUnavailableView(
+                                    "No Audit Events",
+                                    systemImage: "list.bullet.clipboard",
+                                    description: Text("Audit events appear once a Wrapped Session starts.")
+                                )
+                                .padding(.vertical, 8)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, 100)
+                }
+                .refreshable {
+                    await loader.foregroundSync()
+                }
+            }
+            .navigationTitle("Audit")
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
+        }
+    }
+}
+
+// MARK: - Info Tab
+
+struct InfoTab: View {
+    @Bindable var loader: PlanningCenteredStore
+    let credentials: PairedControlCredentials
+    let onDisconnected: () -> Void
+    let onLocalDisconnect: (String) -> Void
+
+    var body: some View {
+        NavigationStack {
+            MacDetailView(
+                state: loader.state,
+                credentials: credentials,
+                loader: loader,
+                onDisconnected: onDisconnected,
+                onLocalDisconnect: onLocalDisconnect
+            )
+            .refreshable { await loader.foregroundSync() }
         }
     }
 }
@@ -657,44 +1377,58 @@ struct MacDetailView: View {
     @State private var isOfferingLocalDisconnect = false
 
     var body: some View {
-        List {
-            Section("Mac") {
-                detailRow(title: "Name", value: state?.macDeviceInfo?.name ?? "Not yet synced")
-                detailRow(title: "macOS", value: state?.macDeviceInfo?.osVersion ?? "Not yet synced")
-                detailRow(title: "Model identifier", value: state?.macDeviceInfo?.modelIdentifier ?? "Not yet synced")
-            }
+        ZStack {
+            GlassTabBackground()
+            ScrollView {
+                LazyVStack(spacing: 12) {
+                    GlassSection("Mac") {
+                        VStack(spacing: 8) {
+                            detailRow(title: "Name", value: state?.macDeviceInfo?.name ?? "Not yet synced")
+                            detailRow(title: "macOS", value: state?.macDeviceInfo?.osVersion ?? "Not yet synced")
+                            detailRow(title: "Model", value: state?.macDeviceInfo?.modelIdentifier ?? "Not yet synced")
+                        }
+                    }
 
-            Section("Repository & Sessions") {
-                detailRow(title: "Configured Repository", value: state?.configuredRepositoryPath ?? "Not yet synced")
-                detailRow(
-                    title: "Active Attached Sessions",
-                    value: state.map { String($0.activeAttachedSessionCount) } ?? "Not yet synced"
-                )
-            }
+                    GlassSection("Repository & Sessions") {
+                        VStack(spacing: 8) {
+                            detailRow(title: "Repository", value: state?.configuredRepositoryPath ?? "Not yet synced")
+                            detailRow(
+                                title: "Active Sessions",
+                                value: state.map { String($0.activeAttachedSessionCount) } ?? "Not yet synced"
+                            )
+                        }
+                    }
 
-            Section("Connection") {
-                detailRow(title: "Control API", value: credentials.controlBaseURL.absoluteString)
-            }
+                    GlassSection("Connection") {
+                        detailRow(title: "Control API", value: credentials.controlBaseURL.absoluteString)
+                    }
 
-            Section {
-                Button(role: .destructive) {
-                    isConfirmingDisconnect = true
-                } label: {
-                    Label("Disconnect", systemImage: "bolt.horizontal.circle")
+                    GlassSection {
+                        Button(role: .destructive) {
+                            isConfirmingDisconnect = true
+                        } label: {
+                            Label("Disconnect", systemImage: "bolt.horizontal.circle")
+                                .frame(maxWidth: .infinity, alignment: .center)
+                        }
+                        .buttonStyle(.glassProminent)
+                        .disabled(loader.isDisconnecting)
+                    }
+
+                    if let errorText = loader.errorText {
+                        GlassSection("Error") {
+                            Text(errorText)
+                                .font(.footnote)
+                                .foregroundStyle(Color.agentError)
+                        }
+                    }
                 }
-                .disabled(loader.isDisconnecting)
-            }
-
-            if let errorText = loader.errorText {
-                Section("Error") {
-                    Text(errorText)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                }
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .padding(.bottom, 100)
             }
         }
         .navigationTitle("Mac")
-        .listStyle(.insetGrouped)
+        .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
         .alert("Disconnect from this Mac?", isPresented: $isConfirmingDisconnect) {
             Button("Disconnect", role: .destructive) {
                 Task {
@@ -732,42 +1466,20 @@ struct MacDetailView: View {
     }
 }
 
-struct PlanningCenteredView: View {
-    let state: PlanningCenteredState
-    let loader: PlanningCenteredStore
-
-    var body: some View {
-        List {
-            PlanningArtifactAttachmentSection(loader: loader)
-            PlanningArtifactSection(artifact: state.activePlanningArtifact)
-
-            AgentSessionSection(session: state.attachedSession, loader: loader)
-
-            StructuredActionsSection(
-                actions: state.structuredActions,
-                pendingApprovalRequest: state.pendingApprovalRequest,
-                draftComment: state.draftComment,
-                loader: loader
-            )
-            FileReviewSection(summary: state.fileReview)
-            AuditTimelineSection(summary: state.auditTimeline)
-        }
-        .listStyle(.insetGrouped)
-    }
-}
 
 struct PlanningArtifactSection: View {
     let artifact: PlanningArtifactSummary
 
     var body: some View {
-        Section("Planning Artifact") {
+        GlassSection("Planning Artifact") {
             VStack(alignment: .leading, spacing: 6) {
-                Text(artifact.label)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(artifact.affordanceTitle)
-                    .font(.subheadline)
-                    .foregroundStyle(artifact.affordanceTitle == "PR Review" ? .purple : .blue)
+                HStack(spacing: 6) {
+                    Image(systemName: artifact.affordanceTitle == "PR Review" ? "arrow.triangle.pull" : "number")
+                        .foregroundStyle(artifact.affordanceTitle == "PR Review" ? Color.agentBlue : Color.agentGreen)
+                    Text(artifact.label)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Text(artifact.title)
                     .font(.headline)
                 Text(artifact.state)
@@ -785,25 +1497,27 @@ struct PlanningArtifactAttachmentSection: View {
     @State private var reference = ""
 
     var body: some View {
-        Section("Attach Planning Artifact") {
+        GlassSection("Attach Planning Artifact") {
             Picker("Type", selection: $selectedKind) {
                 ForEach(PlanningArtifact.Kind.allCases, id: \.rawValue) { kind in
                     Text(kind.displayName).tag(kind)
                 }
             }
             .pickerStyle(.segmented)
+            .padding(.bottom, 4)
 
             TextField("Issue or PR number or URL", text: $reference)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                .padding(.bottom, 4)
 
             Button {
-                Task {
-                    await loader.attach(kind: selectedKind, reference: reference)
-                }
+                Task { await loader.attach(kind: selectedKind, reference: reference) }
             } label: {
                 Label("Attach", systemImage: "link")
+                    .frame(maxWidth: .infinity, alignment: .center)
             }
+            .buttonStyle(.glass)
             .disabled(reference.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || loader.isAttaching)
         }
     }
@@ -812,16 +1526,22 @@ struct PlanningArtifactAttachmentSection: View {
 struct AgentSessionSection: View {
     let session: AttachedSessionSummary?
     @Bindable var loader: PlanningCenteredStore
+    @State private var showPicker = false
+    @State private var confirmRewrapID: String?
 
     var body: some View {
-        Section("Attached Session") {
+        GlassSection("Session") {
             if let session {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(session.title)
-                        .font(.headline)
+                    HStack {
+                        Image(systemName: "terminal.fill")
+                            .foregroundStyle(Color.agentGreen)
+                        Text(session.title)
+                            .font(.headline)
+                    }
                     Text(session.stateText)
                         .font(.subheadline)
-                        .foregroundStyle(.green)
+                        .foregroundStyle(Color.agentGreen)
                     Text(session.summary)
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -833,248 +1553,155 @@ struct AgentSessionSection: View {
                     if let baselineSummary = session.baselineSummary {
                         Text(baselineSummary)
                             .font(.caption)
-                            .foregroundStyle(session.baselineIsDirty ? .orange : .secondary)
+                            .foregroundStyle(session.baselineIsDirty ? Color.agentWarning : .secondary)
                     }
                 }
                 .accessibilityElement(children: .combine)
             } else {
+                // --- Session picker ---
+                if !loader.discoverableSessions.isEmpty {
+                    DiscoverableSessionPicker(loader: loader, confirmRewrapID: $confirmRewrapID)
+                }
+
                 Button {
                     Task {
-                        await loader.startSession()
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.72)) {
+                            showPicker = true
+                        }
+                        await loader.refreshDiscoverable()
                     }
                 } label: {
-                    Label("Start Wrapped Session", systemImage: "play.fill")
+                    if loader.isRefreshingDiscoverable {
+                        HStack {
+                            ProgressView().scaleEffect(0.8)
+                            Text("Scanning…")
+                        }
+                    } else {
+                        Label("Find Running Sessions", systemImage: "magnifyingglass")
+                    }
+                }
+                .disabled(loader.isRefreshingDiscoverable || loader.isAttachingSession)
+
+                Button {
+                    Task { await loader.startSession() }
+                } label: {
+                    Label("Start New Session", systemImage: "play.fill")
                 }
                 .disabled(loader.isStartingSession)
+
+                if let attachErr = loader.sessionAttachError {
+                    Text(attachErr)
+                        .font(.caption)
+                        .foregroundStyle(Color.agentError)
+                }
             }
+        }
+        .confirmationDialog(
+            "Re-wrap Session?",
+            isPresented: Binding(
+                get: { confirmRewrapID != nil },
+                set: { if !$0 { confirmRewrapID = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let id = confirmRewrapID {
+                Button("Re-wrap for Full Control") {
+                    confirmRewrapID = nil
+                    Task { await loader.attachSession(sessionID: id) }
+                }
+                Button("Cancel", role: .cancel) { confirmRewrapID = nil }
+            }
+        } message: {
+            Text("The running claude process will be restarted with --continue. Conversation history is preserved; terminal scrollback will be lost.")
         }
     }
 }
 
-struct StructuredActionsSection: View {
-    let actions: [StructuredActionSummary]
-    let pendingApprovalRequest: ApprovalRequestSummary?
-    let draftComment: DraftCommentSummary?
+struct DiscoverableSessionPicker: View {
     @Bindable var loader: PlanningCenteredStore
+    @Binding var confirmRewrapID: String?
 
     var body: some View {
-        Section("Structured Actions") {
-            if let pendingApprovalRequest {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(pendingApprovalRequest.title)
-                        .font(.body)
-                    Text(pendingApprovalRequest.detail)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    HStack {
-                        Button {
-                            loader.approvalDecisionToConfirm = .approve
-                        } label: {
-                            Label("Approve", systemImage: "checkmark.circle.fill")
-                        }
-                        .disabled(loader.isSubmittingApprovalDecision)
-
-                        Button(role: .destructive) {
-                            loader.approvalDecisionToConfirm = .deny
-                        } label: {
-                            Label("Deny", systemImage: "xmark.circle.fill")
-                        }
-                        .disabled(loader.isSubmittingApprovalDecision)
-                    }
+        ForEach(loader.discoverableSessions) { discovered in
+            Button {
+                if discovered.hookWired {
+                    Task { await loader.attachSession(sessionID: discovered.id) }
+                } else {
+                    confirmRewrapID = discovered.id
                 }
-                .confirmationDialog(
-                    "Send approval decision?",
-                    isPresented: approvalDecisionConfirmationBinding,
-                    titleVisibility: .visible
-                ) {
-                    if let decision = loader.approvalDecisionToConfirm {
-                        Button(decision == .approve ? "Approve" : "Deny", role: decision == .deny ? .destructive : nil) {
-                            Task {
-                                await loader.decideApproval(decision, requestID: pendingApprovalRequest.id)
-                            }
+            } label: {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: discovered.hookWired ? "checkmark.shield.fill" : "shield")
+                        .foregroundStyle(discovered.hookWired ? Color.agentGreen : Color.agentWarning)
+                        .font(.system(size: 18))
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(discovered.repoPath.isEmpty ? "Unknown directory" : (discovered.repoPath as NSString).lastPathComponent)
+                            .font(.subheadline.bold())
+                            .foregroundStyle(.primary)
+                        Text(discovered.repoPath.isEmpty ? "" : discovered.repoPath)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        HStack(spacing: 6) {
+                            Text(discovered.kind.badgeTitle)
+                                .font(.caption2.bold())
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(discovered.hookWired ? Color.agentGreen.opacity(0.2) : Color.agentWarning.opacity(0.2), in: Capsule())
+                                .foregroundStyle(discovered.hookWired ? Color.agentGreen : Color.agentWarning)
+                            Text(discovered.lastActivity.relativeDescription)
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
                         }
                     }
-                    Button("Cancel", role: .cancel) {
-                        loader.approvalDecisionToConfirm = nil
-                    }
-                }
-            }
 
-            if let draftComment {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(draftComment.title)
-                        .font(.body)
-                    Text(draftComment.statusText)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    TextField("Draft Comment", text: $loader.draftCommentBody, axis: .vertical)
-                        .font(.caption)
-                        .lineLimit(6...12)
-                    if let failureMessage = draftComment.failureMessage {
-                        Text(failureMessage)
+                    Spacer()
+
+                    if loader.isAttachingSession {
+                        ProgressView().scaleEffect(0.7)
+                    } else {
+                        Image(systemName: "chevron.right")
                             .font(.caption)
-                            .foregroundStyle(.red)
-                    }
-                    HStack {
-                        Button {
-                            loader.draftCommentDecisionToConfirm = .approve
-                        } label: {
-                            Label("Post", systemImage: "paperplane.fill")
-                        }
-                        .disabled(
-                            !draftComment.requiresApproval
-                                || loader.draftCommentBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                || loader.isSubmittingDraftCommentDecision
-                        )
-
-                        Button(role: .destructive) {
-                            loader.draftCommentDecisionToConfirm = .reject
-                        } label: {
-                            Label("Reject", systemImage: "xmark.circle.fill")
-                        }
-                        .disabled(!draftComment.requiresApproval || loader.isSubmittingDraftCommentDecision)
+                            .foregroundStyle(.tertiary)
                     }
                 }
-                .confirmationDialog(
-                    "Decide Draft Comment?",
-                    isPresented: draftCommentDecisionConfirmationBinding,
-                    titleVisibility: .visible
-                ) {
-                    if let decision = loader.draftCommentDecisionToConfirm {
-                        Button(decision == .approve ? "Post to GitHub" : "Reject", role: decision == .reject ? .destructive : nil) {
-                            Task {
-                                await loader.decideDraftComment(decision, draftID: draftComment.id)
-                            }
-                        }
-                    }
-                    Button("Cancel", role: .cancel) {
-                        loader.draftCommentDecisionToConfirm = nil
-                    }
-                }
+                .contentShape(Rectangle())
             }
-
-            ForEach(actions) { action in
-                if action.id == "reply", action.isAvailable {
-                    VStack(alignment: .leading, spacing: 8) {
-                        actionHeader(action)
-                        TextField("Reply", text: $loader.replyText, axis: .vertical)
-                            .lineLimit(1...4)
-                            .textInputAutocapitalization(.sentences)
-                        Button {
-                            if action.requiresConfirmation {
-                                loader.isConfirmingUncertainReply = true
-                            } else {
-                                Task {
-                                    await loader.submitReply()
-                                }
-                            }
-                        } label: {
-                            Label("Send Reply", systemImage: "paperplane.fill")
-                        }
-                        .disabled(loader.replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || loader.isSubmittingReply)
-                        .confirmationDialog(
-                            "Send reply to uncertain Pending Input?",
-                            isPresented: $loader.isConfirmingUncertainReply,
-                            titleVisibility: .visible
-                        ) {
-                            Button("Send Reply", role: .destructive) {
-                                Task {
-                                    await loader.submitReply(confirmUncertainInput: true)
-                                }
-                            }
-                            Button("Cancel", role: .cancel) {}
-                        }
-                    }
-                } else if action.id == "draft-comment" {
-                    if draftComment == nil {
-                        VStack(alignment: .leading, spacing: 8) {
-                            actionHeader(action)
-                            Button {
-                                Task {
-                                    await loader.prepareDraft()
-                                }
-                            } label: {
-                                Label("Prepare Draft", systemImage: "doc.text.magnifyingglass")
-                            }
-                            .disabled(!action.isAvailable || loader.isPreparingDraftComment)
-                        }
-                    }
-                } else if action.id == "guarded-stop" {
-                    if action.isAvailable {
-                        VStack(alignment: .leading, spacing: 8) {
-                            actionHeader(action)
-                            Button(role: .destructive) {
-                                loader.isConfirmingStop = true
-                            } label: {
-                                Label("Stop Session", systemImage: "stop.circle.fill")
-                            }
-                            .disabled(loader.isStoppingSession)
-                            .confirmationDialog(
-                                "Stop active Wrapped Session?",
-                                isPresented: $loader.isConfirmingStop,
-                                titleVisibility: .visible
-                            ) {
-                                Button("Stop Session", role: .destructive) {
-                                    Task {
-                                        await loader.stopSession()
-                                    }
-                                }
-                                Button("Cancel", role: .cancel) {
-                                    loader.isConfirmingStop = false
-                                }
-                            }
-                        }
-                    }
-                } else if pendingApprovalRequest == nil || (action.id != "approve" && action.id != "deny") {
-                    HStack {
-                        actionHeader(action)
-                        Spacer()
-                        Image(systemName: action.isAvailable ? "checkmark.circle.fill" : "circle.slash")
-                            .foregroundStyle(action.isAvailable ? .green : .secondary)
-                            .accessibilityHidden(true)
-                    }
-                    .accessibilityElement(children: .combine)
-                }
-            }
-        }
-    }
-
-    private var approvalDecisionConfirmationBinding: Binding<Bool> {
-        Binding {
-            loader.approvalDecisionToConfirm != nil
-        } set: { isPresented in
-            if !isPresented {
-                loader.approvalDecisionToConfirm = nil
-            }
-        }
-    }
-
-    private var draftCommentDecisionConfirmationBinding: Binding<Bool> {
-        Binding {
-            loader.draftCommentDecisionToConfirm != nil
-        } set: { isPresented in
-            if !isPresented {
-                loader.draftCommentDecisionToConfirm = nil
-            }
-        }
-    }
-
-    private func actionHeader(_ action: StructuredActionSummary) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(action.title)
-                .font(.body)
-            Text(action.reason)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            .buttonStyle(.plain)
+            .disabled(loader.isAttachingSession)
         }
     }
 }
+
+extension DiscoverableSession.Kind {
+    var badgeTitle: String {
+        switch self {
+        case .agentLaunched: return "FULL CONTROL"
+        case .externalTmux: return "RE-WRAP"
+        case .bareGhostty: return "BARE · RE-WRAP"
+        }
+    }
+}
+
+extension Date {
+    var relativeDescription: String {
+        let ago = -timeIntervalSinceNow
+        switch ago {
+        case ..<60: return "just now"
+        case ..<3600: return "\(Int(ago / 60))m ago"
+        case ..<86400: return "\(Int(ago / 3600))h ago"
+        default: return "\(Int(ago / 86400))d ago"
+        }
+    }
+}
+
 
 struct PlaceholderSection: View {
     let summary: PlaceholderSummary
 
     var body: some View {
-        Section(summary.title) {
+        GlassSection(summary.title) {
             Text(summary.detail)
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -1086,7 +1713,7 @@ struct FileReviewSection: View {
     let summary: FileReviewSummary
 
     var body: some View {
-        Section(summary.title) {
+        GlassSection(summary.title) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(summary.detail)
                     .font(.callout)
@@ -1154,24 +1781,27 @@ struct AuditTimelineSection: View {
     let summary: AuditTimelineSummary
 
     var body: some View {
-        Section(summary.title) {
+        GlassSection(summary.title) {
             if summary.entries.isEmpty {
                 Text("No audit events yet.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(summary.entries) { entry in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(entry.title)
-                            .font(.body)
-                        Text(entry.detail)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(entry.occurredAt, style: .time)
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(summary.entries) { entry in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(entry.title)
+                                .font(.subheadline.bold())
+                                .foregroundStyle(.primary)
+                            Text(entry.detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(entry.occurredAt, style: .time)
+                                .font(.caption2)
+                                .foregroundStyle(Color.agentGreen.opacity(0.8))
+                        }
+                        .accessibilityElement(children: .combine)
                     }
-                    .accessibilityElement(children: .combine)
                 }
             }
         }

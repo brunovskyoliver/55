@@ -42,8 +42,20 @@ public protocol DraftCommentDecisionSubmitting: Sendable {
     func submitDraftCommentDecision(_ request: SubmitDraftCommentDecisionRequest) throws -> SubmitDraftCommentDecisionResponse
 }
 
+public protocol DiscoverableSessionListing: Sendable {
+    func listDiscoverableSessions() -> ListDiscoverableSessionsResponse
+}
+
+public protocol SessionAttaching: Sendable {
+    func attachSession(_ request: AttachSessionRequest) throws -> AttachSessionResponse
+}
+
 public protocol MacDeviceInfoProviding: Sendable {
     func macDeviceInfo() -> MacDeviceInfo
+}
+
+public protocol PushTokenRegistering: Sendable {
+    func registerPushToken(deviceID: String, request: RegisterPushTokenRequest) throws
 }
 
 public struct SystemMacDeviceInfoProvider: MacDeviceInfoProviding {
@@ -73,10 +85,12 @@ public struct SystemMacDeviceInfoProvider: MacDeviceInfoProviding {
     }
 }
 
-public final class DemoControlService: ControlAPIProviding, PlanningArtifactAttaching, WrappedSessionStarting, WrappedSessionStopSubmitting, PendingInputSignalAccepting, PendingInputReplySubmitting, ApprovalRequestSignalAccepting, ApprovalDecisionSubmitting, DraftCommentPreparing, DraftCommentDecisionSubmitting, @unchecked Sendable {
+public final class DemoControlService: ControlAPIProviding, PlanningArtifactAttaching, WrappedSessionStarting, WrappedSessionStopSubmitting, PendingInputSignalAccepting, PendingInputReplySubmitting, ApprovalRequestSignalAccepting, ApprovalDecisionSubmitting, DraftCommentPreparing, DraftCommentDecisionSubmitting, DiscoverableSessionListing, SessionAttaching, PushTokenRegistering, @unchecked Sendable {
     private let resolver: any PlanningArtifactResolving
     private let baselineCapturer: any WorktreeBaselineCapturing
     private let tmuxLauncher: any TmuxLaunching
+    private let tmuxRewrapper: (any TmuxRewrapping)?
+    private let sessionEnumerator: any ClaudeSessionEnumerating
     private let transcriptCapturer: (any WrappedSessionTranscriptCapturing)?
     private let sessionStopper: any WrappedSessionStopping
     private let inputSender: any WrappedSessionInputSending
@@ -87,12 +101,24 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
     private let eventIDGenerator: @Sendable () -> String
     private let now: @Sendable () -> Date
     private let state: LockedDemoControlServiceState
+    /// When set, the launcher will install hook wiring and register sessions with this server.
+    private let agentEventServer: AgentEventServer?
+    private let adapter: ClaudeCodeAdapter?
+    /// When set, state-transition pushes are sent to paired devices.
+    private let pushSender: APNsPushSender?
+    private let pairingService: MacPairingService?
+    // Per-trigger debounce: last time each trigger fired to suppress rapid re-fires.
+    private let pushDebounce = NSLock()
+    private var lastPushFiredAt: [String: Date] = [:]
+    private static let pushDebounceTTL: TimeInterval = 5
 
     public init(
         resolver: any PlanningArtifactResolving = GitHubPlanningArtifactResolver(),
         configuredRepositoryURL: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
         baselineCapturer: any WorktreeBaselineCapturing = GitWorktreeBaselineCapturer(),
         tmuxLauncher: any TmuxLaunching = TmuxClaudeLauncher(),
+        tmuxRewrapper: (any TmuxRewrapping)? = TmuxClaudeLauncher(),
+        sessionEnumerator: any ClaudeSessionEnumerating = AllClaudeSessionEnumerator(),
         transcriptCapturer: (any WrappedSessionTranscriptCapturing)? = nil,
         sessionStopper: any WrappedSessionStopping = TmuxWrappedSessionStopper(),
         inputSender: any WrappedSessionInputSending = TmuxWrappedSessionInputSender(),
@@ -104,6 +130,10 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
             databaseURL: FileManager.default.temporaryDirectory
                 .appending(path: "AgentSessionControl-\(UUID().uuidString).sqlite")
         ),
+        agentEventServer: AgentEventServer? = nil,
+        adapter: ClaudeCodeAdapter? = nil,
+        pushSender: APNsPushSender? = nil,
+        pairingService: MacPairingService? = nil,
         sessionIDGenerator: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
         draftIDGenerator: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
         eventIDGenerator: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() },
@@ -112,6 +142,12 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
         self.resolver = resolver
         self.baselineCapturer = baselineCapturer
         self.tmuxLauncher = tmuxLauncher
+        self.tmuxRewrapper = tmuxRewrapper
+        self.sessionEnumerator = sessionEnumerator
+        self.agentEventServer = agentEventServer
+        self.adapter = adapter
+        self.pushSender = pushSender
+        self.pairingService = pairingService
         if let transcriptCapturer {
             self.transcriptCapturer = transcriptCapturer
         } else if let transcriptMetadataStore = sessionStore as? any TranscriptMetadataStoring {
@@ -547,12 +583,13 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
             throw launchError
         }
 
-        let tmuxAttachment: TmuxAttachmentInfo
+        let launchResult: TmuxLaunchResult
         do {
-            tmuxAttachment = try tmuxLauncher.launchWrappedSession(
+            launchResult = try tmuxLauncher.launchWrappedSession(
                 sessionID: sessionID,
                 planningArtifact: launchContext.planningArtifact,
-                repositoryURL: launchContext.repositoryURL
+                repositoryURL: launchContext.repositoryURL,
+                hookServerPort: agentEventServer?.port ?? 0
             )
         } catch let error as WrappedSessionLaunchError {
             try? state.append(
@@ -579,6 +616,30 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
                 )
             )
             throw launchError
+        }
+
+        let tmuxAttachment = launchResult.attachment
+
+        // Register the session with the event server and notify the adapter.
+        if let agentEventServer, let hookToken = launchResult.hookToken {
+            let capturedAdapter = adapter
+            agentEventServer.register(wrappedSessionID: sessionID, token: hookToken) { event in
+                capturedAdapter?.ingest(event)
+            }
+            // Bridge adapter detections into the Control API state machine so the
+            // Owner Device sees Pending Input without manual polling.
+            capturedAdapter?.onInputDetection = { [weak self] (detection: AgentInputDetection) in
+                self?.handleAdapterInputDetection(detection)
+            }
+            capturedAdapter?.onStateTransition = { [weak self] from, to in
+                self?.handleStateTransition(from: from, to: to)
+            }
+            capturedAdapter?.sessionLaunched(
+                wrappedSessionID: sessionID,
+                tmuxSessionName: tmuxAttachment.sessionName,
+                tmuxWindowName: tmuxAttachment.windowName,
+                hookServerPort: agentEventServer.port
+            )
         }
 
         let launchResponse = try state.storeLaunchedSession(
@@ -661,6 +722,212 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
         )
     }
 
+    // MARK: - Session discovery + attach
+
+    public func listDiscoverableSessions() -> ListDiscoverableSessionsResponse {
+        ListDiscoverableSessionsResponse(sessions: sessionEnumerator.enumerateAll())
+    }
+
+    public func attachSession(_ request: AttachSessionRequest) throws -> AttachSessionResponse {
+        let all = sessionEnumerator.enumerateAll()
+        guard let discovered = all.first(where: { $0.id == request.sessionID }) else {
+            throw WrappedSessionLaunchError.attachFailed("Session '\(request.sessionID)' not found.")
+        }
+
+        let sessionID = sessionIDGenerator()
+        let hookPort = agentEventServer?.port ?? 0
+
+        switch discovered.kind {
+        case .agentLaunched:
+            // Already hook-wired — focus only, no re-wrap.
+            let sessionName = discovered.tmuxSessionName ?? ""
+            let windowName = discovered.tmuxWindowName ?? "claude"
+            let attachCmd = "tmux attach-session -t \(sessionName)"
+            _ = GhosttyLauncher().focusWithAeroSpaceIfAvailable(
+                attachCommand: attachCmd,
+                sessionName: sessionName,
+                windowName: windowName
+            )
+            // The session is already registered in state from when it was launched.
+            let foreground = try state.foregroundState()
+            let alreadyAttached = foreground.attachedSessions.first { $0.session.id == discovered.id }
+                ?? AttachedSession(
+                    planningArtifactID: "",
+                    session: AgentSession(
+                        id: discovered.id,
+                        displayName: "Claude Code Wrapped Session",
+                        state: .running,
+                        summary: "Attached session.",
+                        tmuxAttachment: TmuxAttachmentInfo(
+                            sessionName: sessionName,
+                            windowName: windowName,
+                            attachCommand: attachCmd,
+                            paneID: discovered.tmuxPaneID
+                        )
+                    )
+                )
+            return AttachSessionResponse(
+                attachedSession: alreadyAttached,
+                foregroundState: foreground
+            )
+
+        case .externalTmux:
+            // Re-wrap in place: respawn the pane with --continue --settings.
+            guard let rewrapper = tmuxRewrapper else {
+                throw WrappedSessionLaunchError.attachFailed("Re-wrap not available.")
+            }
+            let sessionName = discovered.tmuxSessionName ?? ""
+            let windowName = discovered.tmuxWindowName ?? "claude"
+
+            let rewrapResult = try rewrapper.rewrapExistingSession(
+                sessionID: sessionID,
+                tmuxSessionName: sessionName,
+                tmuxWindowName: windowName,
+                tmuxPaneID: discovered.tmuxPaneID,
+                hookServerPort: hookPort
+            )
+
+            wireHooksAndAdapter(
+                sessionID: sessionID,
+                hookToken: rewrapResult.hookToken,
+                tmuxAttachment: rewrapResult.attachment
+            )
+
+            let attachedSession = try state.storeAttachedSession(
+                sessionID: sessionID,
+                tmuxAttachment: rewrapResult.attachment
+            )
+
+            let launcher = GhosttyLauncher()
+            _ = launcher.focusWithAeroSpaceIfAvailable(
+                attachCommand: rewrapResult.attachment.attachCommand,
+                sessionName: sessionName,
+                windowName: windowName
+            )
+
+            return AttachSessionResponse(
+                attachedSession: attachedSession,
+                foregroundState: try state.foregroundState()
+            )
+
+        case .bareGhostty:
+            // Bare claude: adopt cwd into a new managed tmux session with --continue.
+            let repoURL: URL
+            if !discovered.repoPath.isEmpty {
+                repoURL = URL(fileURLWithPath: discovered.repoPath)
+            } else {
+                repoURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            }
+
+            // Create a minimal planning artifact for session naming purposes only.
+            let syntheticArtifact = PlanningArtifact(
+                id: "attach-\(String(sessionID.prefix(8)))",
+                kind: .issue,
+                number: 0,
+                title: "Attached Session",
+                url: URL(string: "https://github.com")!,
+                state: "open"
+            )
+
+            let launchResult = try tmuxLauncher.launchWrappedSession(
+                sessionID: sessionID,
+                planningArtifact: syntheticArtifact,
+                repositoryURL: repoURL,
+                hookServerPort: hookPort
+            )
+
+            wireHooksAndAdapter(
+                sessionID: sessionID,
+                hookToken: launchResult.hookToken,
+                tmuxAttachment: launchResult.attachment
+            )
+
+            let attachedSessionBare = try state.storeAttachedSession(
+                sessionID: sessionID,
+                tmuxAttachment: launchResult.attachment
+            )
+
+            let launcherBare = GhosttyLauncher()
+            _ = launcherBare.focusWithAeroSpaceIfAvailable(
+                attachCommand: launchResult.attachment.attachCommand,
+                sessionName: launchResult.attachment.sessionName,
+                windowName: launchResult.attachment.windowName
+            )
+
+            return AttachSessionResponse(
+                attachedSession: attachedSessionBare,
+                foregroundState: try state.foregroundState()
+            )
+        }
+    }
+
+    private func wireHooksAndAdapter(
+        sessionID: String,
+        hookToken: String?,
+        tmuxAttachment: TmuxAttachmentInfo
+    ) {
+        if let agentEventServer, let hookToken {
+            let capturedAdapter = adapter
+            agentEventServer.register(wrappedSessionID: sessionID, token: hookToken) { event in
+                capturedAdapter?.ingest(event)
+            }
+            capturedAdapter?.onInputDetection = { [weak self] (detection: AgentInputDetection) in
+                self?.handleAdapterInputDetection(detection)
+            }
+            capturedAdapter?.onStateTransition = { [weak self] (from: AdapterSessionState, to: AdapterSessionState) in
+                self?.handleStateTransition(from: from, to: to)
+            }
+            capturedAdapter?.sessionLaunched(
+                wrappedSessionID: sessionID,
+                tmuxSessionName: tmuxAttachment.sessionName,
+                tmuxWindowName: tmuxAttachment.windowName,
+                hookServerPort: agentEventServer.port
+            )
+        }
+    }
+
+    // MARK: - Adapter bridge
+
+    /// Routes `AgentInputDetection` events from `ClaudeCodeAdapter` into the Control API
+    /// state machine so the Owner Device sees Pending Input updates without waiting for
+    /// the next manual foreground sync.
+    ///
+    /// Called on the `AgentEventServer` delivery thread — must not block.
+    private func handleAdapterInputDetection(_ detection: AgentInputDetection) {
+        switch detection.phase {
+        case .cleared:
+            // Clear whatever pending state exists (hook-confirmed clear takes precedence
+            // over both hook-confirmed and heuristic detections).
+            _ = try? acceptPendingInputSignal(.hookCleared())
+
+        case .detected:
+            switch detection.classification {
+            case .approval:
+                // Route to the approve/deny path which already has requestID support.
+                let signal = ApprovalRequestSignal.claudeCodeHook(
+                    requestID: detection.requestID,
+                    title: "Approval required: \(detection.approvalToolName ?? "tool")",
+                    detail: detection.approvalToolName.map { "Claude Code wants to run \($0)." }
+                        ?? "Claude Code is requesting approval to use a tool."
+                )
+                _ = try? acceptApprovalRequestSignal(signal)
+
+            case .question, .freeformInput:
+                let source: PendingInputSource = detection.confidence == .hookConfirmed
+                    ? .claudeCodeHook
+                    : .tmuxHeuristic
+                let signal = PendingInputSignal(
+                    source: source,
+                    kind: .detected,
+                    prompt: detection.prompt,
+                    requestID: detection.requestID,
+                    options: detection.options
+                )
+                _ = try? acceptPendingInputSignal(signal)
+            }
+        }
+    }
+
     private func event(
         planningArtifact: PlanningArtifact,
         agentSessionID: AgentSession.ID? = nil,
@@ -679,6 +946,60 @@ public final class DemoControlService: ControlAPIProviding, PlanningArtifactAtta
             occurredAt: now(),
             metadata: metadata
         )
+    }
+
+    // MARK: - Push notifications
+
+    public func registerPushToken(deviceID: String, request: RegisterPushTokenRequest) throws {
+        try pairingService?.recordPushToken(
+            deviceID: deviceID,
+            token: request.token,
+            environment: request.environment
+        )
+    }
+
+    private func handleStateTransition(from: AdapterSessionState, to: AdapterSessionState) {
+        guard let pushSender, let pairingService else { return }
+
+        struct Trigger { var key: String; var title: String; var body: String }
+        let trigger: Trigger?
+
+        if case .pendingApproval = to {
+            trigger = Trigger(key: "approval", title: "Approval Required", body: "Claude Code needs your approval to continue.")
+        } else if case .pendingUserInput = to {
+            trigger = Trigger(key: "input", title: "Waiting for Input", body: "Claude Code is waiting for your reply.")
+        } else if case .pendingClarification = to {
+            trigger = Trigger(key: "input", title: "Waiting for Input", body: "Claude Code is waiting for your reply.")
+        } else if case .idle = to, from.isBusy {
+            trigger = Trigger(key: "idle", title: "Session Idle", body: "Claude Code finished and is waiting.")
+        } else if case .ended(let reason) = to {
+            trigger = Trigger(key: "ended", title: "Session Ended", body: "Session ended: \(reason.rawValue).")
+        } else {
+            trigger = nil
+        }
+
+        guard let trigger else { return }
+
+        // Debounce: suppress repeated fires of the same trigger within 5 seconds.
+        let now = self.now()
+        let shouldFire = pushDebounce.withLock {
+            if let last = lastPushFiredAt[trigger.key], now.timeIntervalSince(last) < Self.pushDebounceTTL {
+                return false
+            }
+            lastPushFiredAt[trigger.key] = now
+            return true
+        }
+        guard shouldFire else { return }
+
+        let tokens = pairingService.allPushTokens()
+        Task {
+            for entry in tokens {
+                let valid = await pushSender.send(title: trigger.title, body: trigger.body, to: entry.token)
+                if !valid {
+                    pairingService.removePushToken(deviceID: entry.deviceID)
+                }
+            }
+        }
     }
 }
 
@@ -857,6 +1178,35 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
         }
     }
 
+    /// Register an externally-attached session that has no Planning Artifact or baseline.
+    /// Used by `attachSession` for re-wrapped external and bare-Ghostty sessions.
+    func storeAttachedSession(
+        sessionID: String,
+        tmuxAttachment: TmuxAttachmentInfo
+    ) throws -> AttachedSession {
+        try lock.withLock {
+            if let activeSession, activeSession.session.state.isActiveWrappedSession {
+                throw WrappedSessionLaunchError.activeSessionAlreadyRunning(activeSession.session.id)
+            }
+
+            pendingInput = .unavailable
+            pendingApprovalRequest = nil
+            pendingDraftComment = .unavailable
+            let session = AgentSession(
+                id: sessionID,
+                displayName: "Attached Session",
+                state: .running,
+                summary: "Attached to existing Claude Code session.",
+                tmuxAttachment: tmuxAttachment,
+                worktreeBaseline: nil
+            )
+            // No planning artifact — use empty string for planningArtifactID.
+            let attachedSession = AttachedSession(planningArtifactID: "", session: session)
+            activeSession = attachedSession
+            return attachedSession
+        }
+    }
+
     func prepareStop(_ request: StopWrappedSessionRequest) throws -> WrappedSessionStopContext {
         try lock.withLock {
             guard request.confirmStop else {
@@ -936,19 +1286,23 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
             pendingInput = nextPendingInput
             self.activeSession = activeSession.withState(sessionState(pendingInput: nextPendingInput, pendingApprovalRequest: pendingApprovalRequest))
 
+            var metadata: [String: String] = [
+                "pendingInputStatus": nextPendingInput.status.rawValue,
+                "pendingInputSource": nextPendingInput.source?.rawValue ?? "none"
+            ]
+            if let reqID = nextPendingInput.requestID { metadata["requestID"] = reqID }
+            if !nextPendingInput.options.isEmpty { metadata["optionCount"] = "\(nextPendingInput.options.count)" }
+
             try sessionStore.append(
                 SessionEventLogEntry(
                     id: eventID,
                     planningArtifactID: activeAttachment.id,
                     agentSessionID: activeSession.session.id,
-                    eventType: .sessionLifecycle,
+                    eventType: .pendingInput,
                     title: lifecycleTitle(for: nextPendingInput),
                     detail: lifecycleDetail(for: nextPendingInput),
                     occurredAt: occurredAt,
-                    metadata: [
-                        "pendingInputStatus": nextPendingInput.status.rawValue,
-                        "pendingInputSource": nextPendingInput.source?.rawValue ?? "none"
-                    ]
+                    metadata: metadata
                 )
             )
 
@@ -1352,7 +1706,9 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
                 status: .hookConfirmed,
                 source: .claudeCodeHook,
                 prompt: signal.prompt,
-                detectedAt: occurredAt
+                detectedAt: occurredAt,
+                requestID: signal.requestID,
+                options: signal.options
             )
         case (.tmuxHeuristic, .detected):
             guard current.status != .hookConfirmed else {
@@ -1362,7 +1718,9 @@ private final class LockedDemoControlServiceState: @unchecked Sendable {
                 status: .uncertain,
                 source: .tmuxHeuristic,
                 prompt: signal.prompt,
-                detectedAt: occurredAt
+                detectedAt: occurredAt,
+                requestID: signal.requestID,
+                options: signal.options
             )
         case (.claudeCodeHook, .cleared):
             return .unavailable

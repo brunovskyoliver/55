@@ -62,14 +62,15 @@ public struct TmuxApprovalDecisionSender: ApprovalDecisionSending {
             "n"
         }
 
+        let target = tmuxAttachment.paneID ?? tmuxAttachment.sessionName
         do {
             _ = try executor.run(
                 executable: "tmux",
-                arguments: ["send-keys", "-t", tmuxAttachment.sessionName, "-l", reply]
+                arguments: ["send-keys", "-t", target, "-l", reply]
             )
             _ = try executor.run(
                 executable: "tmux",
-                arguments: ["send-keys", "-t", tmuxAttachment.sessionName, "Enter"]
+                arguments: ["send-keys", "-t", target, "Enter"]
             )
         } catch let error as ProcessCommandFailure {
             throw ApprovalDecisionError.decisionSendFailed(error.stderr.trimmingCharacters(in: .whitespacesAndNewlines))

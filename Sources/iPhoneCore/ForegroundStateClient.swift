@@ -31,8 +31,20 @@ public protocol DraftCommentClient: Sendable {
     func submitDraftCommentDecision(_ request: SubmitDraftCommentDecisionRequest) async throws -> SubmitDraftCommentDecisionResponse
 }
 
+public protocol DiscoverableSessionClient: Sendable {
+    func listDiscoverableSessions() async throws -> ListDiscoverableSessionsResponse
+}
+
+public protocol SessionAttachClient: Sendable {
+    func attachSession(_ request: AttachSessionRequest) async throws -> AttachSessionResponse
+}
+
 public protocol PairingRevokeClient: Sendable {
     func revokePairing() async throws
+}
+
+public protocol PushTokenClient: Sendable {
+    func registerPushToken(_ request: RegisterPushTokenRequest) async throws
 }
 
 public struct HTTPForegroundStateClient: ForegroundStateClient {
@@ -57,7 +69,8 @@ public struct HTTPForegroundStateClient: ForegroundStateClient {
             throw ForegroundStateClientError.pairedTLSRequired
         }
 
-        let request = authorizedRequest(url: baseURL.appending(path: "v1/foreground-state"))
+        // 10s is generous for a local LAN request; avoids blocking the polling loop for 60s.
+        let request = authorizedRequest(url: baseURL.appending(path: "v1/foreground-state"), timeoutInterval: 10)
 
         let (data, response) = try await session.data(for: request)
 
@@ -69,8 +82,8 @@ public struct HTTPForegroundStateClient: ForegroundStateClient {
         return try decoder.decode(ControlForegroundResponse.self, from: data)
     }
 
-    private func authorizedRequest(url: URL) -> URLRequest {
-        var request = URLRequest(url: url)
+    private func authorizedRequest(url: URL, timeoutInterval: TimeInterval = 60) -> URLRequest {
+        var request = URLRequest(url: url, timeoutInterval: timeoutInterval)
         if let credentials {
             request.setValue(credentials.deviceID, forHTTPHeaderField: "X-Owner-Device-ID")
             request.setValue(credentials.authorizationHeaderValue, forHTTPHeaderField: "Authorization")
@@ -259,6 +272,55 @@ extension HTTPForegroundStateClient: DraftCommentClient {
     }
 }
 
+extension HTTPForegroundStateClient: DiscoverableSessionClient {
+    public func listDiscoverableSessions() async throws -> ListDiscoverableSessionsResponse {
+        guard baseURL.scheme == "https" else {
+            throw ForegroundStateClientError.pairedTLSRequired
+        }
+
+        let request = authorizedRequest(url: baseURL.appending(path: "v1/agent-session/discoverable"), timeoutInterval: 10)
+
+        let (data, response) = try await session.data(for: request)
+
+        if let httpResponse = response as? HTTPURLResponse,
+           !(200..<300).contains(httpResponse.statusCode) {
+            let errorResponse = try? decoder.decode(ControlAPIErrorResponse.self, from: data)
+            throw ForegroundStateClientError.requestFailed(
+                statusCode: httpResponse.statusCode,
+                message: errorResponse?.message ?? "Session discovery failed."
+            )
+        }
+
+        return try decoder.decode(ListDiscoverableSessionsResponse.self, from: data)
+    }
+}
+
+extension HTTPForegroundStateClient: SessionAttachClient {
+    public func attachSession(_ request: AttachSessionRequest) async throws -> AttachSessionResponse {
+        guard baseURL.scheme == "https" else {
+            throw ForegroundStateClientError.pairedTLSRequired
+        }
+
+        var urlRequest = authorizedRequest(url: baseURL.appending(path: "v1/agent-session/attach"))
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.httpBody = try encoder.encode(request)
+
+        let (data, response) = try await session.data(for: urlRequest)
+
+        if let httpResponse = response as? HTTPURLResponse,
+           !(200..<300).contains(httpResponse.statusCode) {
+            let errorResponse = try? decoder.decode(ControlAPIErrorResponse.self, from: data)
+            throw ForegroundStateClientError.requestFailed(
+                statusCode: httpResponse.statusCode,
+                message: errorResponse?.message ?? "Session attach failed."
+            )
+        }
+
+        return try decoder.decode(AttachSessionResponse.self, from: data)
+    }
+}
+
 extension HTTPForegroundStateClient: PairingRevokeClient {
     public func revokePairing() async throws {
         guard baseURL.scheme == "https" else {
@@ -276,6 +338,30 @@ extension HTTPForegroundStateClient: PairingRevokeClient {
             throw ForegroundStateClientError.requestFailed(
                 statusCode: httpResponse.statusCode,
                 message: errorResponse?.message ?? "Pairing revoke failed."
+            )
+        }
+    }
+}
+
+extension HTTPForegroundStateClient: PushTokenClient {
+    public func registerPushToken(_ request: RegisterPushTokenRequest) async throws {
+        guard baseURL.scheme == "https" else {
+            throw ForegroundStateClientError.pairedTLSRequired
+        }
+
+        var urlRequest = authorizedRequest(url: baseURL.appending(path: "v1/push-token"))
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.httpBody = try encoder.encode(request)
+
+        let (data, response) = try await session.data(for: urlRequest)
+
+        if let httpResponse = response as? HTTPURLResponse,
+           !(200..<300).contains(httpResponse.statusCode) {
+            let errorResponse = try? decoder.decode(ControlAPIErrorResponse.self, from: data)
+            throw ForegroundStateClientError.requestFailed(
+                statusCode: httpResponse.statusCode,
+                message: errorResponse?.message ?? "Push token registration failed."
             )
         }
     }

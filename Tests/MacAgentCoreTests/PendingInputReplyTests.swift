@@ -165,13 +165,14 @@ private struct PendingInputTmuxLauncher: TmuxLaunching {
     func launchWrappedSession(
         sessionID: String,
         planningArtifact: PlanningArtifact,
-        repositoryURL: URL
-    ) throws -> TmuxAttachmentInfo {
-        TmuxAttachmentInfo(
+        repositoryURL: URL,
+        hookServerPort: UInt16
+    ) throws -> TmuxLaunchResult {
+        TmuxLaunchResult(attachment: TmuxAttachmentInfo(
             sessionName: "agent-issue-7",
             windowName: "claude",
             attachCommand: "tmux attach-session -t agent-issue-7"
-        )
+        ))
     }
 }
 

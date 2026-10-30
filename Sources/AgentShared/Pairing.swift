@@ -106,19 +106,37 @@ public struct PairingSecretMaterial: Codable, Equatable, Sendable {
     public var ownerDevicePublicKey: String
     public var bearerToken: String
     public var pairedAt: Date
+    /// APNs device token (hex-encoded) registered by the owner device; nil until registered.
+    public var pushToken: String?
+    /// APNs environment ("sandbox" or "production") of the registered token.
+    public var apnsEnvironment: String?
 
     public init(
         deviceID: String,
         ownerDeviceName: String,
         ownerDevicePublicKey: String,
         bearerToken: String,
-        pairedAt: Date
+        pairedAt: Date,
+        pushToken: String? = nil,
+        apnsEnvironment: String? = nil
     ) {
         self.deviceID = deviceID
         self.ownerDeviceName = ownerDeviceName
         self.ownerDevicePublicKey = ownerDevicePublicKey
         self.bearerToken = bearerToken
         self.pairedAt = pairedAt
+        self.pushToken = pushToken
+        self.apnsEnvironment = apnsEnvironment
+    }
+}
+
+public struct RegisterPushTokenRequest: Codable, Equatable, Sendable {
+    public var token: String
+    public var environment: String
+
+    public init(token: String, environment: String) {
+        self.token = token
+        self.environment = environment
     }
 }
 

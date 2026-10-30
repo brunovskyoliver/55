@@ -22,12 +22,6 @@
 	<string>1</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Used to scan the Mac Agent pairing QR code.</string>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>Used to discover and connect to the Mac Agent on your local network.</string>
-	<key>NSBonjourServices</key>
-	<array>
-		<string>_agentctl._tcp</string>
-	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
 </dict>

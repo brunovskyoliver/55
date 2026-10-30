@@ -217,6 +217,50 @@ final class PairingSecurityTests: XCTestCase {
 
         XCTAssertEqual(response.statusCode, 404)
     }
+
+    // MARK: - HTTP body reassembly tests
+
+    /// Regression test: `ParsedLocalControlAPIRequest(rawData:)` must correctly extract the body
+    /// even when headers and body arrive as separate Data chunks (the pre-fix bug scenario).
+    func testParsedRequestExtractsBodyFromRawData() throws {
+        let bodyJSON = #"{"key":"value"}"#
+        let rawHTTP = "POST /v1/test HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: \(bodyJSON.utf8.count)\r\n\r\n\(bodyJSON)"
+        let data = Data(rawHTTP.utf8)
+
+        let parsed = try XCTUnwrap(ParsedLocalControlAPIRequest(rawData: data))
+
+        XCTAssertEqual(parsed.method, "POST")
+        XCTAssertEqual(parsed.path, "/v1/test")
+        XCTAssertEqual(parsed.body, Data(bodyJSON.utf8))
+        XCTAssertTrue(parsed.isBodyComplete)
+    }
+
+    /// Simulates split delivery: headers arrive first, body arrives second.
+    /// After each chunk, `isBodyComplete` should report correctly.
+    func testParsedRequestDetectsIncompleteBodyAcrossChunks() throws {
+        let bodyJSON = #"{"greeting":"hello"}"#
+        let headers = "POST /v1/test HTTP/1.1\r\nContent-Length: \(bodyJSON.utf8.count)\r\n\r\n"
+        let headerData = Data(headers.utf8)
+
+        // Headers only — body not yet arrived.
+        let partial = try XCTUnwrap(ParsedLocalControlAPIRequest(rawData: headerData))
+        XCTAssertFalse(partial.isBodyComplete)
+        XCTAssertTrue(partial.body.isEmpty)
+
+        // Append the body.
+        var fullData = headerData
+        fullData.append(Data(bodyJSON.utf8))
+        let complete = try XCTUnwrap(ParsedLocalControlAPIRequest(rawData: fullData))
+        XCTAssertTrue(complete.isBodyComplete)
+        XCTAssertEqual(complete.body, Data(bodyJSON.utf8))
+    }
+
+    /// When no Content-Length header is present, `isBodyComplete` is true immediately.
+    func testParsedRequestWithoutContentLengthIsImmediatelyComplete() throws {
+        let raw = "GET /v1/foreground-state HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+        let parsed = try XCTUnwrap(ParsedLocalControlAPIRequest(rawData: Data(raw.utf8)))
+        XCTAssertTrue(parsed.isBodyComplete)
+    }
 }
 
 private final class MutablePairingClock: PairingClock, @unchecked Sendable {

@@ -55,6 +55,7 @@ public enum ControlAPISecurityPolicy: Sendable {
     case unsecuredDemo
     case pairedTLS(PairedControlAPIAuthorizer)
 
+    #if os(macOS)
     func authorize(
         request: ParsedLocalControlAPIRequest,
         channelSecurity: ControlAPIChannelSecurity
@@ -66,6 +67,7 @@ public enum ControlAPISecurityPolicy: Sendable {
             return authorizer.authorize(headers: request.headers, channelSecurity: channelSecurity)
         }
     }
+    #endif
 
     func authorizePairingCompletion(channelSecurity: ControlAPIChannelSecurity) -> PairedControlAPIAuthorizationResult {
         switch self {

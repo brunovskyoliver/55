@@ -36,6 +36,9 @@ public struct LocalControlAPIResponder: Sendable {
     private let approvalDecisionSubmitter: (any ApprovalDecisionSubmitting)?
     private let draftCommentPreparer: (any DraftCommentPreparing)?
     private let draftCommentDecisionSubmitter: (any DraftCommentDecisionSubmitting)?
+    private let discoverableSessionLister: (any DiscoverableSessionListing)?
+    private let sessionAttacher: (any SessionAttaching)?
+    private let pushTokenRegistrar: (any PushTokenRegistering)?
     private let pairingService: MacPairingService?
     private let securityPolicy: ControlAPISecurityPolicy
     private let encoder: JSONEncoder
@@ -54,6 +57,9 @@ public struct LocalControlAPIResponder: Sendable {
         self.approvalDecisionSubmitter = provider as? any ApprovalDecisionSubmitting
         self.draftCommentPreparer = provider as? any DraftCommentPreparing
         self.draftCommentDecisionSubmitter = provider as? any DraftCommentDecisionSubmitting
+        self.discoverableSessionLister = provider as? any DiscoverableSessionListing
+        self.sessionAttacher = provider as? any SessionAttaching
+        self.pushTokenRegistrar = provider as? any PushTokenRegistering
         self.pairingService = pairingService
         self.securityPolicy = securityPolicy
         self.encoder = JSONEncoder()
@@ -67,6 +73,14 @@ public struct LocalControlAPIResponder: Sendable {
         channelSecurity: ControlAPIChannelSecurity = .plainHTTP
     ) -> LocalControlAPIHTTPResponse {
         let request = ParsedLocalControlAPIRequest(rawRequest: rawRequest)
+        return response(for: request, channelSecurity: channelSecurity)
+    }
+
+    // Internal entry point used by the NWConnection handler (avoids String round-trip).
+    func response(
+        for request: ParsedLocalControlAPIRequest,
+        channelSecurity: ControlAPIChannelSecurity = .plainHTTP
+    ) -> LocalControlAPIHTTPResponse {
 
         if request.method == "GET", request.path == LocalControlAPIServer.foregroundStatePath {
             let authorization = securityPolicy.authorize(request: request, channelSecurity: channelSecurity)
@@ -161,6 +175,32 @@ public struct LocalControlAPIResponder: Sendable {
                     errorCode: "pairing_device_not_found",
                     message: "The paired device is not recognised."
                 )
+            default:
+                return authorizationFailureResponse(authorization)
+            }
+        }
+
+        if request.method == "GET", request.path == LocalControlAPIServer.discoverableSessionsPath {
+            let authorization = securityPolicy.authorize(request: request, channelSecurity: channelSecurity)
+            guard case .authorized = authorization else {
+                return authorizationFailureResponse(authorization)
+            }
+            return discoverableSessionsResponse()
+        }
+
+        if request.method == "POST", request.path == LocalControlAPIServer.sessionAttachPath {
+            let authorization = securityPolicy.authorize(request: request, channelSecurity: channelSecurity)
+            guard case .authorized = authorization else {
+                return authorizationFailureResponse(authorization)
+            }
+            return sessionAttachResponse(body: request.body)
+        }
+
+        if request.method == "POST", request.path == LocalControlAPIServer.pushTokenPath {
+            let authorization = securityPolicy.authorize(request: request, channelSecurity: channelSecurity)
+            switch authorization {
+            case .authorized(let deviceID):
+                return pushTokenResponse(deviceID: deviceID, body: request.body)
             default:
                 return authorizationFailureResponse(authorization)
             }
@@ -427,6 +467,7 @@ public struct LocalControlAPIResponder: Sendable {
 
     private func pairingCompletionResponse(body: Data) -> LocalControlAPIHTTPResponse {
         guard let pairingService else {
+            agentLog("[PairingCompletion] pairingService not available", category: .pairing)
             return jsonErrorResponse(
                 status: "503 Service Unavailable",
                 statusCode: 503,
@@ -435,8 +476,21 @@ public struct LocalControlAPIResponder: Sendable {
             )
         }
 
+        guard !body.isEmpty else {
+            agentLog("[PairingCompletion] received empty body — request body likely split across TLS records and not yet reassembled", category: .pairing)
+            return jsonErrorResponse(
+                status: "400 Bad Request",
+                statusCode: 400,
+                errorCode: "pairing_empty_body",
+                message: "Request body was empty."
+            )
+        }
+
+        agentLog("[PairingCompletion] decoding body (\(body.count) bytes)", category: .pairing)
+
         do {
             let request = try decoder.decode(PairingCompletionRequest.self, from: body)
+            agentLog("[PairingCompletion] success for device: \(request.ownerDeviceName)", category: .pairing)
             return LocalControlAPIHTTPResponse(
                 status: "200 OK",
                 statusCode: 200,
@@ -444,6 +498,7 @@ public struct LocalControlAPIResponder: Sendable {
                 body: try encoder.encode(pairingService.completePairing(request))
             )
         } catch MacPairingServiceError.invitationExpired {
+            agentLog("[PairingCompletion] invitation expired", category: .pairing)
             return jsonErrorResponse(
                 status: "410 Gone",
                 statusCode: 410,
@@ -451,6 +506,7 @@ public struct LocalControlAPIResponder: Sendable {
                 message: "The pairing invitation has expired."
             )
         } catch MacPairingServiceError.unknownInvitation, MacPairingServiceError.invalidInvitationSecret {
+            agentLog("[PairingCompletion] invalid invitation/secret", category: .pairing)
             return jsonErrorResponse(
                 status: "401 Unauthorized",
                 statusCode: 401,
@@ -458,6 +514,7 @@ public struct LocalControlAPIResponder: Sendable {
                 message: "The pairing invitation is invalid."
             )
         } catch {
+            agentLog("[PairingCompletion] error: \(error)", category: .pairing)
             return jsonErrorResponse(
                 status: "400 Bad Request",
                 statusCode: 400,
@@ -498,6 +555,94 @@ public struct LocalControlAPIResponder: Sendable {
                 statusCode: 500,
                 errorCode: "pairing_revoke_failed",
                 message: "The pairing could not be revoked."
+            )
+        }
+    }
+
+    private func discoverableSessionsResponse() -> LocalControlAPIHTTPResponse {
+        guard let discoverableSessionLister else {
+            return jsonErrorResponse(
+                status: "503 Service Unavailable",
+                statusCode: 503,
+                errorCode: "session_discovery_unavailable",
+                message: "This Mac Agent cannot list discoverable sessions."
+            )
+        }
+        do {
+            return LocalControlAPIHTTPResponse(
+                status: "200 OK",
+                statusCode: 200,
+                contentType: "application/json",
+                body: try encoder.encode(discoverableSessionLister.listDiscoverableSessions())
+            )
+        } catch {
+            return jsonErrorResponse(
+                status: "500 Internal Server Error",
+                statusCode: 500,
+                errorCode: "session_discovery_failed",
+                message: "Session discovery failed."
+            )
+        }
+    }
+
+    private func sessionAttachResponse(body: Data) -> LocalControlAPIHTTPResponse {
+        guard let sessionAttacher else {
+            return jsonErrorResponse(
+                status: "503 Service Unavailable",
+                statusCode: 503,
+                errorCode: "session_attach_unavailable",
+                message: "This Mac Agent cannot attach to sessions."
+            )
+        }
+        do {
+            let request = try decoder.decode(AttachSessionRequest.self, from: body)
+            return LocalControlAPIHTTPResponse(
+                status: "200 OK",
+                statusCode: 200,
+                contentType: "application/json",
+                body: try encoder.encode(try sessionAttacher.attachSession(request))
+            )
+        } catch let error as WrappedSessionLaunchError {
+            return jsonErrorResponse(
+                status: "409 Conflict",
+                statusCode: 409,
+                errorCode: error.apiErrorCode,
+                message: error.userMessage
+            )
+        } catch {
+            return jsonErrorResponse(
+                status: "400 Bad Request",
+                statusCode: 400,
+                errorCode: "session_attach_failed",
+                message: "The session attach request could not be completed."
+            )
+        }
+    }
+
+    private func pushTokenResponse(deviceID: String, body: Data) -> LocalControlAPIHTTPResponse {
+        guard let pushTokenRegistrar else {
+            return jsonErrorResponse(
+                status: "503 Service Unavailable",
+                statusCode: 503,
+                errorCode: "push_token_unavailable",
+                message: "This Mac Agent cannot register push tokens."
+            )
+        }
+        do {
+            let request = try decoder.decode(RegisterPushTokenRequest.self, from: body)
+            try pushTokenRegistrar.registerPushToken(deviceID: deviceID, request: request)
+            return LocalControlAPIHTTPResponse(
+                status: "200 OK",
+                statusCode: 200,
+                contentType: "application/json",
+                body: Data("{}".utf8)
+            )
+        } catch {
+            return jsonErrorResponse(
+                status: "400 Bad Request",
+                statusCode: 400,
+                errorCode: "push_token_registration_failed",
+                message: "The push token could not be registered."
             )
         }
     }
@@ -615,12 +760,14 @@ public struct LocalControlAPIResponder: Sendable {
             return "409 Conflict"
         case .baselineCaptureFailed, .tmuxLaunchFailed:
             return "502 Bad Gateway"
+        case .attachFailed:
+            return "409 Conflict"
         }
     }
 
     private func wrappedSessionFailureStatusCode(for error: WrappedSessionLaunchError) -> Int {
         switch error {
-        case .noActivePlanningArtifact, .activeSessionAlreadyRunning:
+        case .noActivePlanningArtifact, .activeSessionAlreadyRunning, .attachFailed:
             return 409
         case .baselineCaptureFailed, .tmuxLaunchFailed:
             return 502
@@ -719,10 +866,13 @@ public final class LocalControlAPIServer: @unchecked Sendable {
     public static let planningArtifactAttachmentPath = "/v1/planning-artifact/attachment"
     public static let wrappedSessionStartPath = "/v1/agent-session/start"
     public static let wrappedSessionStopPath = "/v1/agent-session/stop"
+    public static let discoverableSessionsPath = "/v1/agent-session/discoverable"
+    public static let sessionAttachPath = "/v1/agent-session/attach"
     public static let pendingInputReplyPath = "/v1/pending-input/reply"
     public static let approvalDecisionPath = "/v1/approval-request/decision"
     public static let draftCommentPreparePath = "/v1/draft-comment/prepare"
     public static let draftCommentDecisionPath = "/v1/draft-comment/decision"
+    public static let pushTokenPath = "/v1/push-token"
 
     private let responder: LocalControlAPIResponder
     private let requestedPort: UInt16
@@ -841,21 +991,49 @@ public final class LocalControlAPIServer: @unchecked Sendable {
     // MARK: - Connection handling
 
     private func handleNWConnection(_ connection: NWConnection) {
-        // Read the full HTTP request in one receive (matches existing 4096-byte approach,
-        // but with a larger limit to accommodate bigger request bodies).
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, _, _ in
-            guard let self, let data, !data.isEmpty else {
-                connection.cancel()
+        // Accumulate received data until we have the full HTTP request body.
+        // TLS often delivers headers and body in separate records, so a single
+        // receive() call produces an empty/truncated body — we loop until
+        // Content-Length bytes have arrived (or the peer closes the connection).
+        accumulate(connection: connection, buffer: Data())
+    }
+
+    private func accumulate(connection: NWConnection, buffer: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, _ in
+            guard let self else { connection.cancel(); return }
+
+            var buf = buffer
+            if let data, !data.isEmpty {
+                buf.append(data)
+            }
+
+            // Try to parse a complete request out of what we have so far.
+            if let parsed = ParsedLocalControlAPIRequest(rawData: buf), parsed.isBodyComplete {
+                let response = self.responder.response(for: parsed, channelSecurity: self.channelSecurity)
+                let responseData = self.serialiseHTTPResponse(response)
+                connection.send(content: responseData, completion: .contentProcessed { _ in
+                    connection.cancel()
+                })
                 return
             }
 
-            let rawRequest = String(decoding: data, as: UTF8.self)
-            let response = self.responder.response(for: rawRequest, channelSecurity: self.channelSecurity)
-            let responseData = self.serialiseHTTPResponse(response)
+            // Body not yet complete — keep receiving unless the peer is done.
+            if isComplete {
+                // Peer closed; dispatch whatever we have (body will be truncated but
+                // that is a client error we surface as 400 inside the handler).
+                if let parsed = ParsedLocalControlAPIRequest(rawData: buf) {
+                    let response = self.responder.response(for: parsed, channelSecurity: self.channelSecurity)
+                    let responseData = self.serialiseHTTPResponse(response)
+                    connection.send(content: responseData, completion: .contentProcessed { _ in
+                        connection.cancel()
+                    })
+                } else {
+                    connection.cancel()
+                }
+                return
+            }
 
-            connection.send(content: responseData, completion: .contentProcessed { _ in
-                connection.cancel()
-            })
+            self.accumulate(connection: connection, buffer: buf)
         }
     }
 
@@ -907,13 +1085,64 @@ private extension NSLock {
     }
 }
 
-struct ParsedLocalControlAPIRequest: Sendable {
-    var method: String
-    var path: String
-    var headers: [String: String]
-    var body: Data
+public struct ParsedLocalControlAPIRequest: Sendable {
+    public var method: String
+    public var path: String
+    public var headers: [String: String]
+    public var body: Data
+    /// True when enough bytes have been received to satisfy Content-Length.
+    public var isBodyComplete: Bool
 
-    init(rawRequest: String) {
+    // MARK: - Init from raw Data (used by NWConnection accumulation loop)
+
+    /// Returns nil if the header block is not yet fully received (no `\r\n\r\n` yet).
+    public init?(rawData: Data) {
+        // Find \r\n\r\n in bytes to split header from body without a String round-trip.
+        let separator: [UInt8] = [0x0D, 0x0A, 0x0D, 0x0A]
+        guard let separatorRange = rawData.range(of: Data(separator)) else {
+            return nil  // Headers not yet complete.
+        }
+
+        let headerData = rawData[rawData.startIndex ..< separatorRange.lowerBound]
+        let headerString = String(decoding: headerData, as: UTF8.self)
+        body = Data(rawData[separatorRange.upperBound...])
+
+        let lines = headerString.components(separatedBy: "\r\n")
+        let firstLineParts = (lines.first ?? "").split(separator: " ")
+        method = firstLineParts.first.map(String.init) ?? ""
+
+        if firstLineParts.count > 1 {
+            path = String(firstLineParts[1]).split(separator: "?", maxSplits: 1).first.map(String.init) ?? ""
+        } else {
+            path = ""
+        }
+
+        var parsedHeaders: [String: String] = [:]
+        for line in lines.dropFirst() {
+            guard let sep = line.firstIndex(of: ":") else { continue }
+            let name = line[..<sep].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let value = line[line.index(after: sep)...].trimmingCharacters(in: .whitespacesAndNewlines)
+            parsedHeaders[name] = value
+        }
+        headers = parsedHeaders
+
+        // Determine if we have received enough bytes for the body.
+        if let contentLengthStr = parsedHeaders["content-length"],
+           let contentLength = Int(contentLengthStr) {
+            isBodyComplete = body.count >= contentLength
+            // Trim body to exactly Content-Length bytes (no trailing TLS record noise).
+            if body.count > contentLength {
+                body = Data(body.prefix(contentLength))
+            }
+        } else {
+            // No Content-Length → body is whatever arrived (GET, empty POSTs, etc.).
+            isBodyComplete = true
+        }
+    }
+
+    // MARK: - Init from raw String (legacy; used by tests and the public String-based API)
+
+    public init(rawRequest: String) {
         let parts = rawRequest.components(separatedBy: "\r\n\r\n")
         let headerBlock = parts.first ?? ""
         body = Data(parts.dropFirst().joined(separator: "\r\n\r\n").utf8)
@@ -930,15 +1159,19 @@ struct ParsedLocalControlAPIRequest: Sendable {
 
         var parsedHeaders: [String: String] = [:]
         for line in lines.dropFirst() {
-            guard let separator = line.firstIndex(of: ":") else {
-                continue
-            }
-
+            guard let separator = line.firstIndex(of: ":") else { continue }
             let name = line[..<separator].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             let value = line[line.index(after: separator)...].trimmingCharacters(in: .whitespacesAndNewlines)
             parsedHeaders[name] = value
         }
         headers = parsedHeaders
+
+        if let contentLengthStr = parsedHeaders["content-length"],
+           let contentLength = Int(contentLengthStr) {
+            isBodyComplete = body.count >= contentLength
+        } else {
+            isBodyComplete = true
+        }
     }
 }
 #endif

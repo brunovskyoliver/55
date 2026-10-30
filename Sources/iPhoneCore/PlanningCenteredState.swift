@@ -7,6 +7,9 @@ public struct PlanningCenteredState: Equatable, Sendable {
     public var activeAttachedSessionCount: Int
     public var activePlanningArtifact: PlanningArtifactSummary
     public var attachedSession: AttachedSessionSummary?
+    /// Non-nil when the Wrapped Session is waiting for text input or a question answer.
+    /// The approval path (approve/deny) is represented separately in `pendingApprovalRequest`.
+    public var pendingInput: PendingInputState?
     public var pendingApprovalRequest: ApprovalRequestSummary?
     public var draftComment: DraftCommentSummary?
     public var structuredActions: [StructuredActionSummary]
@@ -19,6 +22,7 @@ public struct PlanningCenteredState: Equatable, Sendable {
         activeAttachedSessionCount: Int = 0,
         activePlanningArtifact: PlanningArtifactSummary,
         attachedSession: AttachedSessionSummary?,
+        pendingInput: PendingInputState? = nil,
         pendingApprovalRequest: ApprovalRequestSummary? = nil,
         draftComment: DraftCommentSummary? = nil,
         structuredActions: [StructuredActionSummary],
@@ -30,6 +34,7 @@ public struct PlanningCenteredState: Equatable, Sendable {
         self.activeAttachedSessionCount = activeAttachedSessionCount
         self.activePlanningArtifact = activePlanningArtifact
         self.attachedSession = attachedSession
+        self.pendingInput = pendingInput
         self.pendingApprovalRequest = pendingApprovalRequest
         self.draftComment = draftComment
         self.structuredActions = structuredActions
@@ -274,9 +279,11 @@ public struct PlanningStateMapper: PlanningStateMapping {
             throw PlanningStateMapperError.missingActivePlanningArtifact
         }
 
-        let attachedSession = response.attachedSessions
-            .first { $0.planningArtifactID == activeArtifact.id }
+        let attachedSession = (response.attachedSessions.first { $0.planningArtifactID == activeArtifact.id }
+            ?? response.attachedSessions.first)
             .map(sessionSummary)
+
+        let pendingInput: PendingInputState? = response.pendingInput.status != .unavailable ? response.pendingInput : nil
 
         return PlanningCenteredState(
             configuredRepositoryPath: response.configuredRepository?.path,
@@ -284,6 +291,7 @@ public struct PlanningStateMapper: PlanningStateMapping {
             activeAttachedSessionCount: response.attachedSessions.filter { $0.session.state.isActiveWrappedSession }.count,
             activePlanningArtifact: artifactSummary(activeArtifact),
             attachedSession: attachedSession,
+            pendingInput: pendingInput,
             pendingApprovalRequest: response.pendingApprovalRequest.map(approvalRequestSummary),
             draftComment: draftCommentSummary(response.draftComment),
             structuredActions: actionSummaries(response.structuredActionAvailability),

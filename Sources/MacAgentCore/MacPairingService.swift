@@ -42,6 +42,9 @@ public final class MacPairingService: @unchecked Sendable {
     private let clock: any PairingClock
     private let lock = NSLock()
     private var invitations: [PairingInvitation.ID: PairingInvitation] = [:]
+    /// In-memory push token registry: deviceID → (token, environment).
+    /// Lost on process restart; owner devices re-register on each foreground session.
+    private var pushTokens: [String: (token: String, environment: String)] = [:]
 
     public init(
         secretStore: any PairingSecretMaterialStore,
@@ -116,6 +119,27 @@ public final class MacPairingService: @unchecked Sendable {
         }
 
         try secretStore.delete(deviceID: deviceID)
+        lock.withLock { _ = pushTokens.removeValue(forKey: deviceID) }
+    }
+
+    /// Register or update the APNs push token for a paired device.
+    public func recordPushToken(deviceID: String, token: String, environment: String) throws {
+        guard try secretStore.material(forDeviceID: deviceID) != nil else {
+            throw MacPairingServiceError.unknownDevice
+        }
+        lock.withLock { pushTokens[deviceID] = (token: token, environment: environment) }
+    }
+
+    /// Remove a stale push token (e.g. after APNs returns 410 or BadDeviceToken).
+    public func removePushToken(deviceID: String) {
+        lock.withLock { _ = pushTokens.removeValue(forKey: deviceID) }
+    }
+
+    /// All currently registered push tokens, keyed by device ID.
+    public func allPushTokens() -> [(deviceID: String, token: String, environment: String)] {
+        lock.withLock {
+            pushTokens.map { ($0.key, $0.value.token, $0.value.environment) }
+        }
     }
 
     private func consumeInvitation(id: PairingInvitation.ID) throws -> PairingInvitation {

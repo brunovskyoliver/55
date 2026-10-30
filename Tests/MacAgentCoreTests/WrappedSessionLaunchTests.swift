@@ -177,9 +177,14 @@ final class WrappedSessionLaunchTests: XCTestCase {
         XCTAssertEqual(response.foregroundState.auditTimeline.entries.map(\.title), storedEvents.map(\.title))
     }
 
-    func testGhosttyLauncherReusesRunningGhosttyWhenAppleScriptSucceeds() {
+    // New GhosttyLauncher behavior (D7): uses tmux switch-client when a client is attached;
+    // falls back to a fresh Ghostty window only if no tmux client exists.
+
+    func testGhosttyLauncherSwitchesClientWhenTmuxClientIsAttached() {
+        // tmux list-clients returns a client name → switch-client.
+        // Ghostty activation is now done via NSRunningApplication.activate (no executor call).
         let executor = FakeProcessCommandExecutor(results: [
-            "osascript": .success("")
+            "tmux": .success("client0\n")
         ])
         let launcher = GhosttyLauncher(
             executor: executor,
@@ -192,17 +197,16 @@ final class WrappedSessionLaunchTests: XCTestCase {
         )
 
         XCTAssertNil(warning)
-        XCTAssertEqual(executor.executedCommands.map(\.executable), ["osascript"])
+        // list-clients → switch-client (Ghostty raise via NSRunningApplication, not executor)
+        XCTAssertEqual(executor.executedCommands.map(\.executable), ["tmux", "tmux"])
+        XCTAssertTrue(executor.executedCommands[0].arguments.contains("list-clients"))
+        XCTAssertTrue(executor.executedCommands[1].arguments.contains("switch-client"))
     }
 
-    func testGhosttyLauncherFallsBackToFreshLaunchWhenReuseFails() {
+    func testGhosttyLauncherFallsBackToFreshLaunchWhenNoTmuxClient() {
+        // tmux list-clients returns empty → fall back to launchFresh
         let executor = FakeProcessCommandExecutor(results: [
-            "osascript": .failure(ProcessCommandFailure(
-                executable: "osascript",
-                arguments: [],
-                exitCode: 1,
-                stderr: "System Events is not allowed to send keystrokes."
-            )),
+            "tmux": .success(""),   // no clients
             "open": .success("")
         ])
         let launcher = GhosttyLauncher(
@@ -216,7 +220,7 @@ final class WrappedSessionLaunchTests: XCTestCase {
         )
 
         XCTAssertNil(warning)
-        XCTAssertEqual(executor.executedCommands.map(\.executable), ["osascript", "open"])
+        XCTAssertEqual(executor.executedCommands.map(\.executable), ["tmux", "open"])
         XCTAssertEqual(
             executor.executedCommands.last?.arguments,
             ["-na", "Ghostty.app", "--args", "-e", "tmux", "attach-session", "-t", "agent-issue-15"]
@@ -224,7 +228,9 @@ final class WrappedSessionLaunchTests: XCTestCase {
     }
 
     func testGhosttyLauncherFreshLaunchesWhenGhosttyIsNotRunning() {
+        // No tmux client (list-clients returns empty), Ghostty not running → open fresh window
         let executor = FakeProcessCommandExecutor(results: [
+            "tmux": .success(""),
             "open": .success("")
         ])
         let launcher = GhosttyLauncher(
@@ -238,7 +244,11 @@ final class WrappedSessionLaunchTests: XCTestCase {
         )
 
         XCTAssertNil(warning)
-        XCTAssertEqual(executor.executedCommands.map(\.executable), ["open"])
+        XCTAssertEqual(executor.executedCommands.map(\.executable), ["tmux", "open"])
+        XCTAssertEqual(
+            executor.executedCommands.last?.arguments,
+            ["-na", "Ghostty.app", "--args", "-e", "tmux", "attach-session", "-t", "agent-issue-15"]
+        )
     }
 }
 
@@ -320,8 +330,9 @@ private final class FakeTmuxLauncher: TmuxLaunching, @unchecked Sendable {
     func launchWrappedSession(
         sessionID: String,
         planningArtifact: PlanningArtifact,
-        repositoryURL: URL
-    ) throws -> TmuxAttachmentInfo {
+        repositoryURL: URL,
+        hookServerPort: UInt16
+    ) throws -> TmuxLaunchResult {
         try lock.withLock {
             count += 1
             events?.append("tmux")
@@ -330,10 +341,12 @@ private final class FakeTmuxLauncher: TmuxLaunching, @unchecked Sendable {
                 throw error
             }
 
-            return TmuxAttachmentInfo(
-                sessionName: "agent-\(planningArtifact.id)",
-                windowName: "claude",
-                attachCommand: "tmux attach-session -t agent-\(planningArtifact.id)"
+            return TmuxLaunchResult(
+                attachment: TmuxAttachmentInfo(
+                    sessionName: "agent-\(planningArtifact.id)",
+                    windowName: "claude",
+                    attachCommand: "tmux attach-session -t agent-\(planningArtifact.id)"
+                )
             )
         }
     }
@@ -374,57 +387,7 @@ private final class RecordedLaunchEvents: @unchecked Sendable {
     }
 }
 
-private final class FakeProcessCommandExecutor: ProcessCommandExecuting, @unchecked Sendable {
-    enum Result {
-        case success(String)
-        case failure(ProcessCommandFailure)
-    }
-
-    struct ExecutedCommand: Equatable {
-        var executable: String
-        var arguments: [String]
-    }
-
-    private let lock = NSLock()
-    private let results: [String: Result]
-    private var commands: [ExecutedCommand] = []
-
-    init(results: [String: Result]) {
-        self.results = results
-    }
-
-    var executedCommands: [ExecutedCommand] {
-        lock.withLock { commands }
-    }
-
-    func run(executable: String, arguments: [String]) throws -> ProcessCommandResult {
-        lock.withLock {
-            commands.append(ExecutedCommand(executable: executable, arguments: arguments))
-        }
-        let key = ([executable] + arguments).joined(separator: " ")
-        switch results[key] ?? results[executable] {
-        case .success(let text):
-            return ProcessCommandResult(stdout: Data(text.utf8))
-        case .failure(let error):
-            throw error
-        case nil:
-            throw ProcessCommandFailure(
-                executable: executable,
-                arguments: arguments,
-                exitCode: 1,
-                stderr: "unexpected command: \(key)"
-            )
-        }
-    }
-}
-
-private struct FakeGhosttyRunningProbe: GhosttyRunningProbing {
-    var isRunning: Bool
-
-    func isGhosttyRunning() -> Bool {
-        isRunning
-    }
-}
+// FakeProcessCommandExecutor and FakeGhosttyRunningProbe are defined in TestHelpers.swift
 
 private func postRequest(path: String, body: Data) -> String {
     """

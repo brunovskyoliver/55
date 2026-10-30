@@ -2,20 +2,11 @@ name: AgentControl
 options:
   bundleIdPrefix: com.agentsessioncontrol
   deploymentTarget:
-    iOS: "17.0"
+    iOS: "26.0"
   createIntermediateGroups: true
   xcodeVersion: "15"
   # xcodegen omits the package back-reference for local packages; patch it after generation.
-  postGenCommand: >
-    python3 -c "
-    import pathlib, sys
-    p = pathlib.Path('AgentControl.xcodeproj/project.pbxproj')
-    t = p.read_text()
-    old = 'isa = XCSwiftPackageProductDependency;\n\t\t\tproductName = iPhoneApp;'
-    new = 'isa = XCSwiftPackageProductDependency;\n\t\t\tpackage = C37907D93885161518BE9B0A /* XCLocalSwiftPackageReference \"..\" */;\n\t\t\tproductName = iPhoneApp;'
-    if old in t: p.write_text(t.replace(old, new)); print('patched pbxproj')
-    else: print('already patched or pattern changed')
-    "
+  postGenCommand: python3 -c "import pathlib; p = pathlib.Path('AgentControl.xcodeproj/project.pbxproj'); t = p.read_text(); old = 'isa = XCSwiftPackageProductDependency;\n\t\t\tproductName = iPhoneApp;'; new = 'isa = XCSwiftPackageProductDependency;\n\t\t\tpackage = C37907D93885161518BE9B0A /* XCLocalSwiftPackageReference \"..\" */;\n\t\t\tproductName = iPhoneApp;'; print('patched pbxproj') if old in t else print('already patched or pattern changed'); p.write_text(t.replace(old, new))"
 
 packages:
   AgentSessionControl:
@@ -25,12 +16,15 @@ targets:
   AgentControl:
     type: application
     platform: iOS
-    deploymentTarget: "17.0"
+    deploymentTarget: "26.0"
     sources:
       - Sources
     dependencies:
       - package: AgentSessionControl
         product: iPhoneApp
+    entitlements:
+      path: AgentControl.entitlements
+      properties: {}
     info:
       path: Info.plist
       properties:
